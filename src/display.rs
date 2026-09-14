@@ -25,8 +25,10 @@ use crate::{
     node::{FileTime, decode_filetime},
 };
 
-pub static SI_UNITS: [&str; 5] = ["P", "T", "G", "M", "K"];
-pub static IEC_UNITS: [&str; 5] = ["Pi", "Ti", "Gi", "Mi", "Ki"];
+// Largest unit is E/Ei (10^18 / 2^60); u64 tops out at ~18E so no further
+// units are needed
+pub static SI_UNITS: [&str; 6] = ["E", "P", "T", "G", "M", "K"];
+pub static IEC_UNITS: [&str; 6] = ["Ei", "Pi", "Ti", "Gi", "Mi", "Ki"];
 static BLOCKS: [char; 5] = ['█', '▓', '▒', '░', ' '];
 const FILETIME_SHOW_LENGTH: usize = 19;
 
@@ -472,7 +474,7 @@ fn get_pretty_name(
     }
 }
 
-pub fn get_units(output_str: &str) -> &'static [&'static str; 5] {
+pub fn get_units(output_str: &str) -> &'static [&'static str; 6] {
     if get_type_of_thousand(output_str) == 1024 {
         &IEC_UNITS
     } else {
@@ -520,10 +522,21 @@ pub fn human_readable_number(size: u64, output_str: &str) -> String {
         for (i, u) in units.iter().enumerate() {
             let marker = thousand.pow((units.len() - i) as u32);
             if size >= marker {
-                if size / marker < 10 {
-                    return format!("{:.1}{}", (size as f32 / marker as f32), u);
+                // Integer rounding in u128 (pdu BUG-8): f32's 24-bit mantissa
+                // loses precision above ~16.7MB, and `{:.1}` can carry into
+                // "10.0X"-style output at unit boundaries.
+                let mut tenths =
+                    ((u128::from(size) * 10 + u128::from(marker) / 2) / u128::from(marker)) as u64;
+                let mut unit = u;
+                // rounding carried up to the next unit (e.g. 1023.999Ki -> 1.0Mi)
+                if i > 0 && tenths >= 10 * thousand {
+                    tenths /= thousand;
+                    unit = &units[i - 1];
                 }
-                return format!("{}{}", (size / marker), u);
+                if tenths < 100 {
+                    return format!("{}.{}{}", tenths / 10, tenths % 10, unit);
+                }
+                return format!("{}{}", tenths / 10, unit);
             }
         }
         format!("{size}B")
@@ -695,7 +708,8 @@ mod tests {
         assert_eq!(human_readable_number(1536, ""), "1.5Ki");
         assert_eq!(human_readable_number(1024 * 512, ""), "512Ki");
         assert_eq!(human_readable_number(1024 * 1024, ""), "1.0Mi");
-        assert_eq!(human_readable_number(1024 * 1024 * 1024 - 1, ""), "1023Mi");
+        // 1Gi - 1 rounds up and promotes (was "1023Mi" with exact floor grading)
+        assert_eq!(human_readable_number(1024 * 1024 * 1024 - 1, ""), "1.0Gi");
         assert_eq!(human_readable_number(1024 * 1024 * 1024 * 20, ""), "20Gi");
         assert_eq!(
             human_readable_number(1024 * 1024 * 1024 * 1024, ""),
@@ -717,6 +731,29 @@ mod tests {
         assert_eq!(human_readable_number(1024 * 100, "si"), "102K");
     }
 
+    // pdu BUG-8 regression: unit-boundary rounding and precision
+    #[test]
+    fn test_human_readable_number_boundaries() {
+        let hrn = human_readable_number;
+        // metric boundary: 999999 rounds to 1000.0K and promotes to 1.0M
+        // (never displays as "1000.0K")
+        assert_eq!(hrn(999_999, "si"), "1.0M");
+        // values just under the next unit round up and promote
+        assert_eq!(hrn(1_048_575, ""), "1.0Mi");
+        assert_eq!(hrn(999_999_999_999_999_999, "si"), "1.0E");
+        // exact powers land on the new E unit
+        assert_eq!(hrn(10_u64.pow(18), "si"), "1.0E");
+        assert_eq!(hrn(1 << 60, ""), "1.0Ei");
+        // u64 max, both bases
+        assert_eq!(hrn(u64::MAX, ""), "16Ei");
+        assert_eq!(hrn(u64::MAX, "si"), "18E");
+        // f32 precision loss (old code showed "10.0Ti"): 10Ti - 1 is "10Ti"
+        assert_eq!(hrn(10 * (1_u64 << 40) - 1, ""), "10Ti");
+        // rounding inside the <10 window stays one decimal
+        assert_eq!(hrn(1024 + 512, ""), "1.5Ki");
+        assert_eq!(hrn(9 * 1024 + 511, ""), "9.5Ki");
+    }
+
     // Refer to https://en.wikipedia.org/wiki/Byte#Multiple-byte_units
     #[test]
     fn test_human_readable_number_kb() {
@@ -732,6 +769,31 @@ mod tests {
         assert_eq!(hrn(1024 * 1000 * 1000 * 20, "kib"), "20000000Ki");
         assert_eq!(hrn(1024 * 1024 * 1000 * 20, "mib"), "20000Mi");
         assert_eq!(hrn(1024 * 1024 * 1024 * 20, "gib"), "20Gi");
+    }
+
+    // pdu BUG-3 analog: percent math uses float division (no integer
+    // multiply), so extreme sizes must stay correct instead of wrapping
+    #[test]
+    fn test_percent_size_extremes() {
+        let mut data = get_fake_display_data(20);
+        data.base_size = u64::MAX;
+        let full = DisplayNode {
+            name: PathBuf::from("/a"),
+            size: u64::MAX,
+            children: vec![],
+        };
+        assert!((data.percent_size(&full) - 1.0).abs() < f32::EPSILON);
+
+        let zero = DisplayNode {
+            name: PathBuf::from("/b"),
+            size: 0,
+            children: vec![],
+        };
+        assert_eq!(data.percent_size(&zero), 0.0);
+
+        // degenerate zero base must not produce NaN
+        data.base_size = 0;
+        assert_eq!(data.percent_size(&full), 0.0);
     }
 
     #[cfg(test)]
