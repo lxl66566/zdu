@@ -87,7 +87,8 @@ fn build_by_all_file_types<'a>(
     by_filetime: Option<&FileTime>,
 ) {
     for node in top_level_nodes {
-        if node.name.is_file() {
+        // PERF-3: is_file recorded during the walk; no per-node stat here
+        if node.is_file {
             let ext = node.name.extension();
             let cumulative_size = counter.entry(ext).or_default();
             if by_filetime.is_some() {
@@ -112,6 +113,7 @@ mod tests {
             children: vec![],
             inode_device: None,
             depth: 1,
+            is_file: true,
         }
     }
 

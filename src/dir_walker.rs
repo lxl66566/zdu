@@ -15,7 +15,7 @@ use rayon::iter::{IntoParallelIterator, ParallelIterator};
 use regex::Regex;
 
 use crate::{
-    node::{FileTime, Node, build_node},
+    node::{EntryMetadata, FileTime, Node, build_node},
     platform::get_metadata,
     progress::{ORDERING, Operation, PAtomicInfo, RuntimeErrors},
     utils::{
@@ -63,7 +63,9 @@ pub struct WalkData<'a> {
 struct PendingDir {
     dir: PathBuf,
     depth: usize,
-    is_symlink: bool,
+    // PERF-2: fetched once when the entry is discovered (with follow-links
+    // semantics), reused when the finished directory Node is built
+    metadata: Option<EntryMetadata>,
     parent: Option<Arc<PendingDir>>,
     // Starts at 1 for the directory itself; incremented per spawned
     // subdirectory task. Each completion decrements by 1. Reaching 0
@@ -94,15 +96,22 @@ pub fn walk_it(dirs: HashSet<PathBuf>, walk_data: &WalkData) -> Vec<Node> {
         let outer = Arc::new(PendingDir {
             dir: PathBuf::new(),
             depth: 0,
-            is_symlink: false,
+            metadata: None,
             parent: None,
             pending: AtomicUsize::new(1),
             children: Mutex::new(Vec::new()),
         });
+        // PERF-2: fetched once here; finalize_chain reuses it when the
+        // finished root Node is built
+        let root_metadata = get_metadata(
+            &d,
+            walk_data.use_apparent_size,
+            walk_data.follow_links && root_is_symlink,
+        );
         let root = Arc::new(PendingDir {
             dir: d,
             depth: 0,
-            is_symlink: root_is_symlink,
+            metadata: root_metadata,
             parent: Some(outer.clone()),
             // Sentinel +1: ensures subdirectory tasks can't bubble through
             // finalize_chain until the root's own scan is done.
@@ -169,6 +178,7 @@ fn clean_inodes(x: Node, inodes: &mut HashSet<(u64, u64)>, walk_data: &WalkData)
         children: new_children,
         inode_device: x.inode_device,
         depth: x.depth,
+        is_file: x.is_file,
     })
 }
 
@@ -225,55 +235,60 @@ fn is_ignored_path(path: &Path, canonical_dir: Option<&Path>, walk_data: &WalkDa
     }
 }
 
-fn ignore_file(entry: &DirEntry, canonical_dir: Option<&Path>, walk_data: &WalkData) -> bool {
-    if is_ignored_path(&entry.path(), canonical_dir, walk_data) {
+// PERF-2: takes the metadata fetched once by process_entry instead of
+// stat-ing per check; is_file comes from the DirEntry's file type (no stat)
+fn ignore_file(
+    path: &Path,
+    is_file: bool,
+    metadata: Option<&EntryMetadata>,
+    canonical_dir: Option<&Path>,
+    walk_data: &WalkData,
+) -> bool {
+    if is_ignored_path(path, canonical_dir, walk_data) {
         return true;
     }
 
-    let is_dot_file = entry.file_name().to_str().unwrap_or("").starts_with('.');
-    let follow_links = walk_data.follow_links && entry.file_type().is_ok_and(|ft| ft.is_symlink());
+    let is_dot_file = path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .is_some_and(|n| n.starts_with('.'));
 
-    if !walk_data.allowed_filesystems.is_empty() {
-        let size_inode_device = get_metadata(entry.path(), false, follow_links);
-        if let Some((_size, Some((_id, dev)), _gunk)) = size_inode_device
-            && !walk_data.allowed_filesystems.contains(&dev)
-        {
-            return true;
-        }
-    }
-    if walk_data.filter_accessed_time.is_some()
-        || walk_data.filter_modified_time.is_some()
-        || walk_data.filter_changed_time.is_some()
+    if !walk_data.allowed_filesystems.is_empty()
+        && let Some((_size, Some((_id, dev)), _gunk)) = metadata
+        && !walk_data.allowed_filesystems.contains(dev)
     {
-        let size_inode_device = get_metadata(entry.path(), false, follow_links);
-        if let Some((_, _, (modified_time, accessed_time, changed_time))) = size_inode_device
-            && entry.path().is_file()
-            && [
-                (&walk_data.filter_modified_time, modified_time),
-                (&walk_data.filter_accessed_time, accessed_time),
-                (&walk_data.filter_changed_time, changed_time),
-            ]
-            .iter()
-            .any(|(filter_time, actual_time)| {
-                is_filtered_out_due_to_file_time(filter_time.as_ref(), *actual_time)
-            })
-        {
-            return true;
-        }
+        return true;
+    }
+    if (walk_data.filter_accessed_time.is_some()
+        || walk_data.filter_modified_time.is_some()
+        || walk_data.filter_changed_time.is_some())
+        && let Some((_, _, (modified_time, accessed_time, changed_time))) = metadata
+        && is_file
+        && [
+            (&walk_data.filter_modified_time, *modified_time),
+            (&walk_data.filter_accessed_time, *accessed_time),
+            (&walk_data.filter_changed_time, *changed_time),
+        ]
+        .iter()
+        .any(|(filter_time, actual_time)| {
+            is_filtered_out_due_to_file_time(filter_time.as_ref(), *actual_time)
+        })
+    {
+        return true;
     }
 
     // Keeping `walk_data.filter_regex.is_empty()` is important for performance reasons, it stops
     // unnecessary work
     if !walk_data.filter_regex.is_empty()
-        && entry.path().is_file()
-        && is_filtered_out_due_to_regex(walk_data.filter_regex, &entry.path())
+        && is_file
+        && is_filtered_out_due_to_regex(walk_data.filter_regex, path)
     {
         return true;
     }
 
     if !walk_data.invert_filter_regex.is_empty()
-        && entry.path().is_file()
-        && is_filtered_out_due_to_invert_regex(walk_data.invert_filter_regex, &entry.path())
+        && is_file
+        && is_filtered_out_due_to_invert_regex(walk_data.invert_filter_regex, path)
     {
         return true;
     }
@@ -398,24 +413,30 @@ fn process_entry<'scope>(
     canonical_dir: Option<&Path>,
     walk_data: &'scope WalkData<'scope>,
 ) -> Option<Node> {
-    if ignore_file(entry, canonical_dir, walk_data) {
+    // PERF-2/5: one path allocation and one metadata fetch per entry, shared
+    // by the ignore checks, the followed-link device/cycle checks and node
+    // building (previously up to 2 opens + several stats per file)
+    let path = entry.path();
+    let file_type = entry.file_type().ok()?;
+    let is_symlink = file_type.is_symlink();
+    let is_file = file_type.is_file();
+    let follow = walk_data.follow_links && is_symlink;
+    let metadata = get_metadata(&path, walk_data.use_apparent_size, follow);
+
+    if ignore_file(&path, is_file, metadata.as_ref(), canonical_dir, walk_data) {
         return None;
     }
-    let data = entry.file_type().ok()?;
-    let is_symlink = data.is_symlink();
 
     // If the entry is a directory we'll spawn off a new task to walk it.
-    if data.is_dir() || (walk_data.follow_links && is_symlink) {
-        if walk_data.follow_links && is_symlink {
+    if file_type.is_dir() || follow {
+        if follow {
             // Resolve the followed link target's identity once. Used for:
             // 1. cycle detection: never descend into a filesystem object we already visited
             //    (Windows junction loops under -L counted the same subtree dozens of times)
             // 2. the -x device check: the cheap Windows metadata path returns no device for
             //    directories, so a junction to another volume would otherwise slip past
             //    `allowed_filesystems`
-            let Some((_, Some(id), _)) = get_metadata(entry.path(), false, true) else {
-                return None;
-            };
+            let id = metadata.as_ref().and_then(|(_, id, _)| *id)?;
             if !walk_data.allowed_filesystems.is_empty()
                 && !walk_data.allowed_filesystems.contains(&id.1)
             {
@@ -433,9 +454,9 @@ fn process_entry<'scope>(
         pending.pending.fetch_add(1, AtomicOrdering::Relaxed);
 
         let child = Arc::new(PendingDir {
-            dir: entry.path(),
+            dir: path,
             depth: pending.depth + 1,
-            is_symlink,
+            metadata,
             parent: Some(pending.clone()),
             pending: AtomicUsize::new(1),
             children: Mutex::new(Vec::new()),
@@ -444,18 +465,14 @@ fn process_entry<'scope>(
         return None;
     }
 
-    let node = build_node(
-        entry.path(),
-        vec![],
-        is_symlink,
-        data.is_file(),
-        pending.depth,
-        walk_data,
-    );
+    let node = build_node(path, vec![], is_file, pending.depth, walk_data, metadata);
 
     let prog_data = &walk_data.progress_data;
     prog_data.num_files.fetch_add(1, ORDERING);
-    if let Some(ref n) = node {
+    if let Some(ref n) = node
+        && walk_data.by_filetime.is_none()
+    {
+        // Timestamps aren't bytes: skip them so the spinner total stays sane
         prog_data.total_file_size.fetch_add(n.size, ORDERING);
     }
     node
@@ -508,10 +525,10 @@ fn finalize_chain(mut pending: Arc<PendingDir>, walk_data: &WalkData) {
         node_to_push = build_node(
             pending.dir.clone(),
             children,
-            pending.is_symlink,
             false,
             pending.depth,
             walk_data,
+            pending.metadata,
         );
         pending = parent;
     }
@@ -567,6 +584,7 @@ mod tests {
             children: vec![],
             inode_device: Some((5, 6)),
             depth: 0,
+            is_file: true,
         }
     }
 
@@ -638,6 +656,7 @@ mod tests {
             children: vec![],
             inode_device: Some((3, 66310)),
             depth: 0,
+            is_file: false,
         };
 
         let b = Node {
@@ -646,6 +665,7 @@ mod tests {
             children: vec![],
             inode_device: None,
             depth: 0,
+            is_file: false,
         };
 
         let c = Node {
@@ -654,6 +674,7 @@ mod tests {
             children: vec![],
             inode_device: Some((1, 66310)),
             depth: 0,
+            is_file: false,
         };
 
         assert_eq!(sort_by_inode(&a, &b), Ordering::Greater);

@@ -2,12 +2,15 @@ use std::{cmp::Ordering, path::PathBuf};
 
 use crate::{
     dir_walker::WalkData,
-    platform::get_metadata,
     utils::{
         is_filtered_out_due_to_file_time, is_filtered_out_due_to_invert_regex,
         is_filtered_out_due_to_regex,
     },
 };
+
+// (size, inode+device, (modified, accessed, changed)) as returned by
+// platform::get_metadata; named so it can be shared between walker stages
+pub type EntryMetadata = (u64, Option<(u64, u64)>, (i64, i64, i64));
 
 #[derive(Debug, Eq, Clone)]
 pub struct Node {
@@ -16,6 +19,9 @@ pub struct Node {
     pub children: Vec<Node>,
     pub inode_device: Option<(u64, u64)>,
     pub depth: usize,
+    // PERF-3: the walker already knows this; storing it avoids a per-node
+    // stat in -t extension aggregation and filter post-processing
+    pub is_file: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -50,25 +56,21 @@ impl From<crate::cli::FileTime> for FileTime {
     }
 }
 
+// PERF-2: metadata is fetched once per entry by the walker and handed in,
+// instead of each stage (ignore checks, node building) stat-ing again
 #[allow(clippy::too_many_arguments)]
 pub fn build_node(
     dir: PathBuf,
     children: Vec<Node>,
-    is_symlink: bool,
     is_file: bool,
     depth: usize,
     walk_data: &WalkData,
+    metadata: Option<EntryMetadata>,
 ) -> Option<Node> {
-    let use_apparent_size = walk_data.use_apparent_size;
     let by_filecount = walk_data.by_filecount;
     let by_filetime = &walk_data.by_filetime;
 
-    get_metadata(
-        &dir,
-        use_apparent_size,
-        walk_data.follow_links && is_symlink,
-    )
-    .map(|data| {
+    metadata.map(|data| {
         let inode_device = data.1;
 
         let size = if is_filtered_out_due_to_regex(walk_data.filter_regex, &dir)
@@ -103,6 +105,7 @@ pub fn build_node(
             children,
             inode_device,
             depth,
+            is_file,
         }
     })
 }

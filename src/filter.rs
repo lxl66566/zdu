@@ -64,6 +64,7 @@ fn total_node_builder(size: u64, children: Vec<Node>) -> Node {
         children,
         inode_device: None,
         depth: 0,
+        is_file: false,
     }
 }
 
@@ -122,7 +123,7 @@ fn always_add_children<'a>(
             .iter()
             .filter(|c| match display_data.min_size {
                 Some(ms) => c.size > ms as u64,
-                None => !display_data.using_a_filter || c.name.is_file() || c.size > 0,
+                None => !display_data.using_a_filter || c.is_file || c.size > 0,
             })
             .filter(|c| {
                 if display_data.only_dir {
@@ -208,6 +209,7 @@ fn handle_duplicate_top_level_names(top_level_nodes: Vec<Node>, short_paths: boo
                             children: node.children.clone(),
                             inode_device: node.inode_device,
                             depth: node.depth,
+                            is_file: node.is_file,
                         };
                         newer.push(n);
                     },
