@@ -190,29 +190,43 @@ fn sort_by_inode(a: &Node, b: &Node) -> Ordering {
     }
 }
 
-// Check if `path` is inside ignored directory
-fn is_ignored_path(path: &Path, walk_data: &WalkData) -> bool {
+// Check if `path` is inside ignored directory. `canonical_dir` is the
+// canonicalized path of the directory containing `path` (computed once per
+// directory): canonical(child) == canonical_dir + file name, so the absolute
+// check below needs no per-entry canonicalize (PERF-1, ~2x slowdown on -X).
+fn is_ignored_path(path: &Path, canonical_dir: Option<&Path>, walk_data: &WalkData) -> bool {
     if walk_data.ignore_directories.contains(path) {
         return true;
     }
 
-    // Entry is inside an ignored absolute path
-    // Absolute paths should be canonicalized before being added to `WalkData.ignore_directories`
-    for ignored_path in &walk_data.ignore_directories {
-        if !ignored_path.is_absolute() {
-            continue;
-        }
-        let absolute_entry_path = fs::canonicalize(path).unwrap_or_default();
-        if absolute_entry_path.starts_with(ignored_path) {
-            return true;
-        }
+    if !walk_data
+        .ignore_directories
+        .iter()
+        .any(|ignored| ignored.is_absolute())
+    {
+        return false;
     }
 
-    false
+    // Entry is inside an ignored absolute path; those are canonicalized in
+    // main. If the parent's canonicalization failed, fall back to a
+    // per-entry canonicalize.
+    if let Some(dir) = canonical_dir {
+        let file_name = path.file_name().unwrap_or_default();
+        walk_data
+            .ignore_directories
+            .iter()
+            .any(|ignored| ignored.is_absolute() && dir.join(file_name).starts_with(ignored))
+    } else {
+        let absolute_entry_path = fs::canonicalize(path).unwrap_or_default();
+        walk_data
+            .ignore_directories
+            .iter()
+            .any(|ignored| ignored.is_absolute() && absolute_entry_path.starts_with(ignored))
+    }
 }
 
-fn ignore_file(entry: &DirEntry, walk_data: &WalkData) -> bool {
-    if is_ignored_path(&entry.path(), walk_data) {
+fn ignore_file(entry: &DirEntry, canonical_dir: Option<&Path>, walk_data: &WalkData) -> bool {
+    if is_ignored_path(&entry.path(), canonical_dir, walk_data) {
         return true;
     }
 
@@ -273,12 +287,22 @@ fn walk_dir<'scope>(
     walk_data: &'scope WalkData<'scope>,
 ) {
     if pending.dir.is_dir() {
+        // Canonicalized once per directory, reused for every entry's ignore
+        // check (PERF-1). Only needed when absolute ignore paths are in play.
+        let canonical_dir: Option<PathBuf> = if walk_data
+            .ignore_directories
+            .iter()
+            .any(|ignored| ignored.is_absolute())
+        {
+            fs::canonicalize(&pending.dir).ok()
+        } else {
+            None
+        };
         // EINTR is the only retryable error. Looping iteratively (rather than
         // recursing on retry, like the old code) keeps stack depth O(1).
         // A directory gives up after MAX_EINTR_RETRIES retries: some
         // network/virtual filesystems return Interrupted forever, and without
         // a cap the walk would spin indefinitely (upstream v1.2.5 semantics).
-        const MAX_EINTR_RETRIES: u32 = 999;
         let mut eintr_retries = 0u32;
         loop {
             let entries = match fs::read_dir(&pending.dir) {
@@ -339,7 +363,9 @@ fn walk_dir<'scope>(
             let file_nodes: Vec<Node> = collected
                 .into_par_iter()
                 .filter_map(|r| match r {
-                    Ok(entry) => process_entry(scope, &pending, &entry, walk_data),
+                    Ok(entry) => {
+                        process_entry(scope, &pending, &entry, canonical_dir.as_deref(), walk_data)
+                    },
                     Err(failed) => {
                         record_error(&failed, &pending.dir, walk_data);
                         None
@@ -369,9 +395,10 @@ fn process_entry<'scope>(
     scope: &rayon::Scope<'scope>,
     pending: &Arc<PendingDir>,
     entry: &DirEntry,
+    canonical_dir: Option<&Path>,
     walk_data: &'scope WalkData<'scope>,
 ) -> Option<Node> {
-    if ignore_file(entry, walk_data) {
+    if ignore_file(entry, canonical_dir, walk_data) {
         return None;
     }
     let data = entry.file_type().ok()?;
@@ -493,6 +520,10 @@ fn finalize_chain(mut pending: Arc<PendingDir>, walk_data: &WalkData) {
 fn is_retryable(failed: &Error) -> bool {
     failed.kind() == std::io::ErrorKind::Interrupted
 }
+
+// Some network/virtual filesystems return Interrupted forever; without a cap
+// the walk would spin indefinitely (upstream v1.2.5 gives up after 999)
+const MAX_EINTR_RETRIES: u32 = 999;
 
 fn record_error(failed: &Error, dir: &Path, walk_data: &WalkData) {
     let mut editable_error = walk_data.errors.lock().unwrap();
