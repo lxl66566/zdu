@@ -153,3 +153,67 @@ pub fn test_recursive_sym_link() {
     assert!(output.contains(a.as_str()));
     assert!(output.contains(b.as_str()));
 }
+
+// Following a directory link that loops back to an ancestor must not expand
+// the loop: each filesystem object is descended into at most once.
+#[cfg(not(target_os = "windows"))]
+#[test]
+pub fn test_sym_link_dir_loop_with_dereference() {
+    let dir = Builder::new().tempdir().unwrap();
+    let dir_s = dir.path().to_str().unwrap();
+
+    let sub = dir.path().join("sub");
+    std::fs::create_dir(&sub).unwrap();
+    std::fs::write(sub.join("big.bin"), vec![0u8; 100_000]).unwrap();
+
+    let link_name = dir.path().join("loop");
+    link_it(&link_name, dir_s, true);
+
+    let mut cmd = cargo_bin_cmd!("zdu");
+    let output = cmd
+        .args(["-p", "-c", "-s", "-w", "999", "-L", dir_s])
+        .unwrap();
+    assert!(output.status.success());
+    let stdout = str::from_utf8(&output.stdout).unwrap();
+    let stderr = str::from_utf8(&output.stderr).unwrap();
+    assert!(!stdout.contains("loop/loop"), "loop expanded: {stdout}");
+    assert!(
+        !stderr.contains("No such file or directory"),
+        "loop ran past path limits: {stderr}"
+    );
+}
+
+// Windows junctions need no elevated privileges, unlike symlinks. `mklink /J`
+// creates the same kind of reparse-point loop that `C:\Users` trees contain.
+#[cfg(target_os = "windows")]
+#[test]
+pub fn test_junction_loop_with_dereference() {
+    use std::process::Command as OsCommand;
+
+    let dir = Builder::new().tempdir().unwrap();
+    let dir_s = dir.path().to_str().unwrap();
+
+    let sub = dir.path().join("sub");
+    std::fs::create_dir(&sub).unwrap();
+    std::fs::write(sub.join("big.bin"), vec![0u8; 100_000]).unwrap();
+
+    let loop_junction = dir.path().join("loop");
+    let status = OsCommand::new("cmd")
+        .args(["/c", "mklink", "/J", loop_junction.to_str().unwrap(), dir_s])
+        .status()
+        .unwrap();
+    assert!(status.success(), "mklink /J failed");
+
+    let mut cmd = cargo_bin_cmd!("zdu");
+    let output = cmd
+        .args(["-p", "-c", "-s", "-w", "999", "-L", dir_s])
+        .unwrap();
+    assert!(output.status.success());
+    let stdout = str::from_utf8(&output.stdout).unwrap();
+    let stderr = str::from_utf8(&output.stderr).unwrap();
+    assert!(!stdout.contains("loop\\loop"), "loop expanded: {stdout}");
+    assert!(
+        !stderr.contains("No such file or directory"),
+        "loop ran past path limits: {stderr}"
+    );
+}

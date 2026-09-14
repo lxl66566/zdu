@@ -46,6 +46,11 @@ pub struct WalkData<'a> {
     pub by_filetime: &'a Option<FileTime>,
     pub ignore_hidden: bool,
     pub follow_links: bool,
+    // Identities of filesystem objects already descended into while following
+    // links. Distinct from the hard-link inode dedup in `clean_inodes`: that
+    // drops duplicate Nodes post-walk, this stops the walker from descending
+    // into the same directory twice (junction/symlink cycles under -L).
+    pub followed_dir_ids: Arc<Mutex<HashSet<(u64, u64)>>>,
     pub progress_data: Arc<PAtomicInfo>,
     pub errors: Arc<Mutex<RuntimeErrors>>,
 }
@@ -73,6 +78,9 @@ pub fn walk_it(dirs: HashSet<PathBuf>, walk_data: &WalkData) -> Vec<Node> {
 
     for d in dirs {
         walk_data.progress_data.clear_state(&d);
+        // Cycle-detection scope is per root: the same target reached via two
+        // different roots should still be walked once per root.
+        walk_data.followed_dir_ids.lock().unwrap().clear();
 
         let root_is_symlink = walk_data.follow_links
             && fs::symlink_metadata(&d).is_ok_and(|m| m.file_type().is_symlink());
@@ -359,6 +367,26 @@ fn process_entry<'scope>(
 
     // If the entry is a directory we'll spawn off a new task to walk it.
     if data.is_dir() || (walk_data.follow_links && is_symlink) {
+        if walk_data.follow_links && is_symlink {
+            // Resolve the followed link target's identity once. Used for:
+            // 1. cycle detection: never descend into a filesystem object we already visited
+            //    (Windows junction loops under -L counted the same subtree dozens of times)
+            // 2. the -x device check: the cheap Windows metadata path returns no device for
+            //    directories, so a junction to another volume would otherwise slip past
+            //    `allowed_filesystems`
+            let Some((_, Some(id), _)) = get_metadata(entry.path(), false, true) else {
+                return None;
+            };
+            if !walk_data.allowed_filesystems.is_empty()
+                && !walk_data.allowed_filesystems.contains(&id.1)
+            {
+                return None;
+            }
+            if !walk_data.followed_dir_ids.lock().unwrap().insert(id) {
+                return None;
+            }
+        }
+
         // Increment must happen before scope.spawn so a fast child's decrement
         // can never observe pending = 0 before this walk_dir's finalize_chain
         // runs. It can be Relaxed ordering because rayon's scope spawn does
@@ -516,6 +544,7 @@ mod tests {
             by_filetime: &None,
             ignore_hidden: false,
             follow_links: false,
+            followed_dir_ids: Arc::new(Mutex::new(HashSet::new())),
             progress_data: indicator.data.clone(),
             errors: Arc::new(Mutex::new(RuntimeErrors::default())),
         }
