@@ -261,7 +261,6 @@ fn main() {
         by_filetime: &by_filetime,
         ignore_hidden,
         follow_links,
-        followed_dir_ids: Arc::new(Mutex::new(HashSet::new())),
         progress_data: indicator.data.clone(),
         errors: errors_for_rayon,
     };

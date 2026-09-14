@@ -46,11 +46,6 @@ pub struct WalkData<'a> {
     pub by_filetime: &'a Option<FileTime>,
     pub ignore_hidden: bool,
     pub follow_links: bool,
-    // Identities of filesystem objects already descended into while following
-    // links. Distinct from the hard-link inode dedup in `clean_inodes`: that
-    // drops duplicate Nodes post-walk, this stops the walker from descending
-    // into the same directory twice (junction/symlink cycles under -L).
-    pub followed_dir_ids: Arc<Mutex<HashSet<(u64, u64)>>>,
     pub progress_data: Arc<PAtomicInfo>,
     pub errors: Arc<Mutex<RuntimeErrors>>,
 }
@@ -66,6 +61,9 @@ struct PendingDir {
     // PERF-2: fetched once when the entry is discovered (with follow-links
     // semantics), reused when the finished directory Node is built
     metadata: Option<EntryMetadata>,
+    // Per-root visited-set for -L cycle detection; carried on the chain so
+    // spawned subdirectory tasks inherit it without extra plumbing
+    followed_dir_ids: Arc<Mutex<HashSet<(u64, u64)>>>,
     parent: Option<Arc<PendingDir>>,
     // Starts at 1 for the directory itself; incremented per spawned
     // subdirectory task. Each completion decrements by 1. Reaching 0
@@ -75,69 +73,94 @@ struct PendingDir {
 }
 
 pub fn walk_it(dirs: HashSet<PathBuf>, walk_data: &WalkData) -> Vec<Node> {
-    let mut inodes = HashSet::new();
-    let mut top_level_nodes: Vec<Node> = Vec::new();
+    // PERF-4: roots are walked concurrently instead of one after another.
+    // Cross-root hardlink dedup stays global (shared `inodes` below).
+    let inodes: Mutex<HashSet<(u64, u64)>> = Mutex::new(HashSet::new());
+    let top_level_nodes: Mutex<Vec<Node>> = Mutex::new(Vec::new());
 
-    for d in dirs {
-        walk_data.progress_data.clear_state(&d);
-        // Cycle-detection scope is per root: the same target reached via two
-        // different roots should still be walked once per root.
-        walk_data.followed_dir_ids.lock().unwrap().clear();
+    rayon::scope(|s| {
+        for d in dirs {
+            let inodes = &inodes;
+            let top_level_nodes = &top_level_nodes;
+            s.spawn(move |_| walk_root(d, walk_data, inodes, top_level_nodes));
+        }
+    });
 
-        let root_is_symlink = walk_data.follow_links
-            && fs::symlink_metadata(&d).is_ok_and(|m| m.file_type().is_symlink());
+    top_level_nodes.into_inner().unwrap()
+}
 
-        // Synthetic outer parent above the root. Lets `finalize_chain` build
-        // the root's Node via the same code path as every other directory: it
-        // pushes the finished root Node into `outer.children`, then bubbles
-        // one more time and stops at outer's `parent: None` early-return
-        // before any further build_node call. We drain `outer.children`
-        // afterwards.
+fn walk_root(
+    d: PathBuf,
+    walk_data: &WalkData,
+    inodes: &Mutex<HashSet<(u64, u64)>>,
+    top_level_nodes: &Mutex<Vec<Node>>,
+) {
+    // Concurrent roots interleave their spinner path/counter updates; that is
+    // cosmetic only (all counters are atomic).
+    walk_data.progress_data.clear_state(&d);
+
+    // Cycle-detection scope is per root: the same target reached via two
+    // different roots should still be walked once per root. Distinct from the
+    // hard-link inode dedup in `clean_inodes`: that drops duplicate Nodes
+    // post-walk, this stops the walker from descending into the same
+    // directory twice (junction/symlink cycles under -L).
+    let followed_dir_ids = Arc::new(Mutex::new(HashSet::new()));
+
+    let root_is_symlink = walk_data.follow_links
+        && fs::symlink_metadata(&d).is_ok_and(|m| m.file_type().is_symlink());
+
+    // Synthetic outer parent above the root. Lets `finalize_chain` build
+    // the root's Node via the same code path as every other directory: it
+    // pushes the finished root Node into `outer.children`, then bubbles
+    // one more time and stops at outer's `parent: None` early-return
+    // before any further build_node call. We drain `outer.children`
+    // afterwards.
         let outer = Arc::new(PendingDir {
             dir: PathBuf::new(),
             depth: 0,
             metadata: None,
+            followed_dir_ids: followed_dir_ids.clone(),
             parent: None,
             pending: AtomicUsize::new(1),
             children: Mutex::new(Vec::new()),
         });
-        // PERF-2: fetched once here; finalize_chain reuses it when the
-        // finished root Node is built
-        let root_metadata = get_metadata(
-            &d,
-            walk_data.use_apparent_size,
-            walk_data.follow_links && root_is_symlink,
-        );
+    // PERF-2: fetched once here; finalize_chain reuses it when the
+    // finished root Node is built
+    let root_metadata = get_metadata(
+        &d,
+        walk_data.use_apparent_size,
+        walk_data.follow_links && root_is_symlink,
+    );
         let root = Arc::new(PendingDir {
             dir: d,
             depth: 0,
             metadata: root_metadata,
+            followed_dir_ids,
             parent: Some(outer.clone()),
-            // Sentinel +1: ensures subdirectory tasks can't bubble through
-            // finalize_chain until the root's own scan is done.
-            pending: AtomicUsize::new(1),
-            children: Mutex::new(Vec::new()),
-        });
+        // Sentinel +1: ensures subdirectory tasks can't bubble through
+        // finalize_chain until the root's own scan is done.
+        pending: AtomicUsize::new(1),
+        children: Mutex::new(Vec::new()),
+    });
 
-        // Single scope per root: all descendant work runs as flat tasks inside
-        // it, so stack depth is O(1) regardless of tree depth.
-        rayon::scope(|s| {
-            s.spawn(move |s| walk_dir(s, root, walk_data));
-        });
+    // Single scope per root: all descendant work runs as flat tasks inside
+    // it, so stack depth is O(1) regardless of tree depth. The visited-set
+    // Arc rides on the PendingDir chain.
+    rayon::scope(|s| {
+        s.spawn(move |s| walk_dir(s, root, walk_data));
+    });
 
-        walk_data
-            .progress_data
-            .state
-            .store(Operation::PREPARING, ORDERING);
+    walk_data
+        .progress_data
+        .state
+        .store(Operation::PREPARING, ORDERING);
 
-        let mut outer_children = std::mem::take(&mut *outer.children.lock().unwrap());
-        if let Some(node) = outer_children.pop()
-            && let Some(cleaned) = clean_inodes(node, &mut inodes, walk_data)
-        {
-            top_level_nodes.push(cleaned);
-        }
+    let mut outer_children = std::mem::take(&mut *outer.children.lock().unwrap());
+    if let Some(node) = outer_children.pop()
+        && let Some(cleaned) = clean_inodes(node, &mut inodes.lock().unwrap(), walk_data)
+    {
+        top_level_nodes.lock().unwrap().push(cleaned);
     }
-    top_level_nodes
 }
 
 // Remove files which have the same inode, we don't want to double count them.
@@ -442,7 +465,7 @@ fn process_entry<'scope>(
             {
                 return None;
             }
-            if !walk_data.followed_dir_ids.lock().unwrap().insert(id) {
+            if !pending.followed_dir_ids.lock().unwrap().insert(id) {
                 return None;
             }
         }
@@ -457,6 +480,7 @@ fn process_entry<'scope>(
             dir: path,
             depth: pending.depth + 1,
             metadata,
+            followed_dir_ids: pending.followed_dir_ids.clone(),
             parent: Some(pending.clone()),
             pending: AtomicUsize::new(1),
             children: Mutex::new(Vec::new()),
@@ -605,7 +629,6 @@ mod tests {
             by_filetime: &None,
             ignore_hidden: false,
             follow_links: false,
-            followed_dir_ids: Arc::new(Mutex::new(HashSet::new())),
             progress_data: indicator.data.clone(),
             errors: Arc::new(Mutex::new(RuntimeErrors::default())),
         }
@@ -757,6 +780,23 @@ mod tests {
         assert_eq!(result.len(), 1);
         assert_eq!(result[0].children.len(), N);
         assert_eq!(count_nodes(&result[0]), N + 1);
+    }
+
+    #[test]
+    fn test_walk_multiple_roots_concurrently() {
+        // PERF-4: roots walk in parallel; all must still be collected
+        let tmp1 = tempfile::tempdir().unwrap();
+        let tmp2 = tempfile::tempdir().unwrap();
+        fs::write(tmp1.path().join("a"), b"a").unwrap();
+        fs::write(tmp2.path().join("b"), b"b").unwrap();
+
+        let walkdata = create_walker(true);
+        let mut roots = HashSet::new();
+        roots.insert(tmp1.path().to_path_buf());
+        roots.insert(tmp2.path().to_path_buf());
+
+        let result = walk_it(roots, &walkdata);
+        assert_eq!(result.len(), 2);
     }
 
     #[test]
