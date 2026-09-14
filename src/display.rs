@@ -90,15 +90,33 @@ impl DisplayData {
 }
 
 struct DrawData<'a> {
+    // Cleaned indent: 2 columns per ancestor level. Maintained incrementally
+    // (PERF-5): each level maps its own 3-char tree group, instead of running
+    // 9 string replaces over the whole prefix per displayed node.
     indent: String,
     percent_bar: String,
     display_data: &'a DisplayData,
+}
+
+// Map one 3-char tree-drawing group to its 2-column continuation form
+fn clean_tree_group(chars: &str) -> &'static str {
+    match chars {
+        "┌─┴" | "└─┬" | "┌──" | "└──" => "  ",
+        // "├─┬", "├─┴", "├──"
+        _ => "│ ",
+    }
 }
 
 impl DrawData<'_> {
     fn get_new_indent(&self, has_children: bool, was_i_last: bool) -> String {
         let chars = self.display_data.get_tree_chars(was_i_last, has_children);
         self.indent.clone() + chars
+    }
+
+    // Cleaned form of get_new_indent's result, for the next level's prefix
+    fn get_new_clean_indent(&self, has_children: bool, was_i_last: bool) -> String {
+        let chars = self.display_data.get_tree_chars(was_i_last, has_children);
+        self.indent.clone() + clean_tree_group(chars)
     }
 
     // TODO: can we test this?
@@ -239,8 +257,9 @@ fn find_longest_dir_name(
 }
 
 fn display_node(node: &DisplayNode, draw_data: &DrawData, is_biggest: bool, is_last: bool) {
+    let has_children = !node.children.is_empty();
     // hacky way of working out how deep we are in the tree
-    let indent = draw_data.get_new_indent(!node.children.is_empty(), is_last);
+    let indent = draw_data.get_new_indent(has_children, is_last);
     let level = ((indent.chars().count() - 1) / 2) - 1;
     let bar_text = draw_data.generate_bar(node, level);
 
@@ -251,7 +270,7 @@ fn display_node(node: &DisplayNode, draw_data: &DrawData, is_biggest: bool, is_l
     }
 
     let dd = DrawData {
-        indent: clean_indentation_string(&indent),
+        indent: draw_data.get_new_clean_indent(has_children, is_last),
         percent_bar: bar_text,
         display_data: draw_data.display_data,
     };
@@ -272,22 +291,9 @@ fn display_node(node: &DisplayNode, draw_data: &DrawData, is_biggest: bool, is_l
     }
 }
 
-fn clean_indentation_string(s: &str) -> String {
-    let mut is: String = s.into();
-    // For reversed:
-    is = is.replace("┌─┴", "  ");
-    is = is.replace("┌──", "  ");
-    is = is.replace("├─┴", "│ ");
-    is = is.replace("─┴", " ");
-    // For normal
-    is = is.replace("└─┬", "  ");
-    is = is.replace("└──", "  ");
-    is = is.replace("├─┬", "│ ");
-    is = is.replace("─┬", " ");
-    // For both
-    is = is.replace("├──", "│ ");
-    is
-}
+// PERF-5 note: the previous implementation ran 9 String::replace passes over
+// the whole indent per displayed node; the mapping is now done one group at a
+// time as each level is appended (see get_new_clean_indent).
 
 pub fn get_printable_name<P: AsRef<Path>>(dir_name: &P, short_paths: bool) -> String {
     let dir_name = dir_name.as_ref();
@@ -656,6 +662,17 @@ mod tests {
         draw_it(idd.clone(), &node, false, 12, false);
         // Width too narrow even for the size column: clean early return
         draw_it(idd, &node, false, 5, false);
+    }
+
+    #[test]
+    fn test_clean_tree_group_mapping() {
+        assert_eq!(clean_tree_group("┌─┴"), "  ");
+        assert_eq!(clean_tree_group("└─┬"), "  ");
+        assert_eq!(clean_tree_group("┌──"), "  ");
+        assert_eq!(clean_tree_group("└──"), "  ");
+        assert_eq!(clean_tree_group("├─┬"), "│ ");
+        assert_eq!(clean_tree_group("├─┴"), "│ ");
+        assert_eq!(clean_tree_group("├──"), "│ ");
     }
 
     #[test]
