@@ -18,7 +18,7 @@ pub struct Node {
     pub depth: usize,
 }
 
-#[derive(Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub enum FileTime {
     Modified,
     Accessed,

@@ -29,6 +29,7 @@ const FILETIME_SHOW_LENGTH: usize = 19;
 
 // Display options are boolean rendering switches by nature
 #[allow(clippy::struct_excessive_bools)]
+#[derive(Clone)]
 pub struct InitialDisplayData {
     pub short_paths: bool,
     pub is_reversed: bool,
@@ -152,10 +153,16 @@ pub fn draw_it(
         find_biggest_size_str(root_node, &idd.output_format)
     };
 
-    assert!(
-        terminal_width > num_chars_needed_on_left_most + 2,
-        "Not enough terminal width"
-    );
+    // BUG-8: previously an assert! panic (which survives release builds);
+    // a clean error on stderr and no drawing is friendlier for scripts
+    if terminal_width <= num_chars_needed_on_left_most + 2 {
+        eprintln!(
+            "Terminal width {terminal_width} is too narrow to draw the tree \
+             (needs more than {} columns)",
+            num_chars_needed_on_left_most + 2
+        );
+        return;
+    }
 
     let allowed_width = terminal_width - num_chars_needed_on_left_most - 2;
     let num_indent_chars = 3;
@@ -305,26 +312,25 @@ fn pad_or_trim_filename(node: &DisplayNode, indent: &str, display_data: &Display
     let indent_and_name = format!("{indent} {name}");
     let width = UnicodeWidthStr::width(&*indent_and_name);
 
-    assert!(
-        display_data.longest_string_length >= width,
-        "Terminal width not wide enough to draw directory tree"
-    );
-
     // Add spaces after the filename so we can draw the % used bar chart.
+    // saturating_sub: extreme trees degrade to no padding instead of panicking
     name + " "
-        .repeat(display_data.longest_string_length - width)
+        .repeat(display_data.longest_string_length.saturating_sub(width))
         .as_str()
 }
 
 fn maybe_trim_filename(name_in: String, indent: &str, display_data: &DisplayData) -> String {
+    // BUG-8: on narrow terminals a deep tree's indent alone can exceed the
+    // whole line budget; degrade to '..' rows instead of panicking
     let indent_length = UnicodeWidthStr::width(indent);
-    assert!(
-        display_data.longest_string_length >= indent_length + 2,
-        "Terminal width not wide enough to draw directory tree"
-    );
+    let max_size = display_data.longest_string_length.saturating_sub(indent_length);
 
-    let max_size = display_data.longest_string_length - indent_length;
-    if UnicodeWidthStr::width(&*name_in) > max_size {
+    if UnicodeWidthStr::width(&*name_in) <= max_size {
+        name_in
+    } else if max_size <= 2 {
+        // no room even for a partial name
+        "..".to_owned()
+    } else {
         // Truncate by display width, not by char count: wide characters (CJK,
         // emoji) take 2 columns each, so taking 'n' chars can overflow the line.
         let mut width_left = max_size - 2;
@@ -338,8 +344,6 @@ fn maybe_trim_filename(name_in: String, indent: &str, display_data: &DisplayData
             name.push(c);
         }
         name + ".."
-    } else {
-        name_in
     }
 }
 
@@ -601,6 +605,40 @@ mod tests {
 
         let s = format_string(&n, indent, percent_bar, is_biggest, &data);
         assert_eq!(s, "short               3 4.0Ki 100%");
+    }
+
+    // BUG-8 regression: deep trees + narrow terminal width must not panic
+    #[test]
+    fn test_draw_it_deep_tree_narrow_width_does_not_panic() {
+        // depth 12 chain of single-child nodes
+        let mut node = DisplayNode {
+            name: PathBuf::from("leaf_file_with_long_name"),
+            size: 2_u64.pow(10),
+            children: vec![],
+        };
+        for i in 0..12 {
+            node = DisplayNode {
+                name: PathBuf::from(format!("dir{i}")),
+                size: 2_u64.pow(12),
+                children: vec![node],
+            };
+        }
+
+        let idd = InitialDisplayData {
+            short_paths: false,
+            is_reversed: false,
+            colors_on: false,
+            dim: false,
+            by_filecount: false,
+            by_filetime: None,
+            is_screen_reader: false,
+            output_format: String::new(),
+            bars_on_right: false,
+        };
+        // Narrow but not trivially rejected width
+        draw_it(idd.clone(), &node, false, 12, false);
+        // Width too narrow even for the size column: clean early return
+        draw_it(idd, &node, false, 5, false);
     }
 
     #[test]
