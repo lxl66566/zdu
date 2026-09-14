@@ -2,8 +2,7 @@ use std::{cell::RefCell, path::PathBuf};
 
 use serde::{Serialize, Serializer, ser::SerializeStruct};
 
-use crate::display::human_readable_number;
-use crate::node::decode_filetime;
+use crate::{display::human_readable_number, node::decode_filetime};
 
 #[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Clone)]
 pub struct DisplayNode {

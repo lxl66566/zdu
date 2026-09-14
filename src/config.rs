@@ -113,8 +113,8 @@ impl Config {
                         x
                     } else {
                         eprintln!(
-                            "Invalid output-format in config file: {x:?} \
-                             (valid: si, b, k/kib, m/mib, g/gib, t/tib, kb, mb, gb, tb)"
+                            "Invalid output-format in config file: {x:?} (valid: si, b, k/kib, \
+                             m/mib, g/gib, t/tib, kb, mb, gb, tb)"
                         );
                         process::exit(1)
                     }

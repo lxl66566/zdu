@@ -65,10 +65,10 @@ tb\:"terabyte (TB)"))' \
 '(--files-from)--files0-from=[Read NUL-terminated paths from FILE (use \`-\` for stdin)]:FILES0_FROM:_files' \
 '(--files0-from)--files-from=[Read newline-terminated paths from FILE (use \`-\` for stdin)]:FILES_FROM:_files' \
 '*--collapse=[Keep these directories collapsed]:COLLAPSE:_files' \
-'-m+[Directory '\''size'\'' is max filetime of child files instead of disk size. while a/c/m for last accessed/changed/modified time]:FILETIME:((a\:"last accessed time"
+'(-f --filecount)-m+[Directory '\''size'\'' is max filetime of child files instead of disk size. while a/c/m for last accessed/changed/modified time]:FILETIME:((a\:"last accessed time"
 c\:"last changed time"
 m\:"last modified time"))' \
-'--filetime=[Directory '\''size'\'' is max filetime of child files instead of disk size. while a/c/m for last accessed/changed/modified time]:FILETIME:((a\:"last accessed time"
+'(-f --filecount)--filetime=[Directory '\''size'\'' is max filetime of child files instead of disk size. while a/c/m for last accessed/changed/modified time]:FILETIME:((a\:"last accessed time"
 c\:"last changed time"
 m\:"last modified time"))' \
 '-p[Subdirectories will not have their path shortened]' \
@@ -97,8 +97,8 @@ m\:"last modified time"))' \
 '--filecount[Directory '\''size'\'' is number of child files instead of disk size]' \
 '-i[Do not display hidden files]' \
 '--ignore-hidden[Do not display hidden files]' \
-'(-d --depth -D --only-dir)-t[show only these file types]' \
-'(-d --depth -D --only-dir)--file-types[show only these file types]' \
+'(-d --depth -D --only-dir -F --only-file)-t[show only these file types]' \
+'(-d --depth -D --only-dir -F --only-file)--file-types[show only these file types]' \
 '-P[Disable the progress indication]' \
 '--no-progress[Disable the progress indication]' \
 '--print-errors[Print path with errors]' \

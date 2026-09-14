@@ -20,7 +20,10 @@ use stfu8::encode_u8;
 use thousands::Separable;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
-use crate::{display_node::DisplayNode, node::{FileTime, decode_filetime}};
+use crate::{
+    display_node::DisplayNode,
+    node::{FileTime, decode_filetime},
+};
 
 pub static SI_UNITS: [&str; 5] = ["P", "T", "G", "M", "K"];
 pub static IEC_UNITS: [&str; 5] = ["Pi", "Ti", "Gi", "Mi", "Ki"];
@@ -175,8 +178,8 @@ pub fn draw_it(
     // a clean error on stderr and no drawing is friendlier for scripts
     if terminal_width <= num_chars_needed_on_left_most + 2 {
         eprintln!(
-            "Terminal width {terminal_width} is too narrow to draw the tree \
-             (needs more than {} columns)",
+            "Terminal width {terminal_width} is too narrow to draw the tree (needs more than {} \
+             columns)",
             num_chars_needed_on_left_most + 2
         );
         return;
@@ -329,7 +332,9 @@ fn maybe_trim_filename(name_in: String, indent: &str, display_data: &DisplayData
     // BUG-8: on narrow terminals a deep tree's indent alone can exceed the
     // whole line budget; degrade to '..' rows instead of panicking
     let indent_length = UnicodeWidthStr::width(indent);
-    let max_size = display_data.longest_string_length.saturating_sub(indent_length);
+    let max_size = display_data
+        .longest_string_length
+        .saturating_sub(indent_length);
 
     if UnicodeWidthStr::width(&*name_in) <= max_size {
         name_in
@@ -417,10 +422,9 @@ fn get_pretty_size(node: &DisplayNode, is_biggest: bool, display_data: &DisplayD
     };
     // BUG-12: filetime strings can exceed the 19-char column assumption for
     // extreme dates; saturate instead of underflowing
-    let spaces_to_add =
-        display_data
-            .num_chars_needed_on_left_most
-            .saturating_sub(output.chars().count());
+    let spaces_to_add = display_data
+        .num_chars_needed_on_left_most
+        .saturating_sub(output.chars().count());
     let output = " ".repeat(spaces_to_add) + output.as_str();
 
     if is_biggest && display_data.initial.colors_on {

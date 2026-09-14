@@ -115,15 +115,15 @@ fn walk_root(
     // one more time and stops at outer's `parent: None` early-return
     // before any further build_node call. We drain `outer.children`
     // afterwards.
-        let outer = Arc::new(PendingDir {
-            dir: PathBuf::new(),
-            depth: 0,
-            metadata: None,
-            followed_dir_ids: followed_dir_ids.clone(),
-            parent: None,
-            pending: AtomicUsize::new(1),
-            children: Mutex::new(Vec::new()),
-        });
+    let outer = Arc::new(PendingDir {
+        dir: PathBuf::new(),
+        depth: 0,
+        metadata: None,
+        followed_dir_ids: followed_dir_ids.clone(),
+        parent: None,
+        pending: AtomicUsize::new(1),
+        children: Mutex::new(Vec::new()),
+    });
     // PERF-2: fetched once here; finalize_chain reuses it when the
     // finished root Node is built
     let root_metadata = get_metadata(
@@ -131,12 +131,12 @@ fn walk_root(
         walk_data.use_apparent_size,
         walk_data.follow_links && root_is_symlink,
     );
-        let root = Arc::new(PendingDir {
-            dir: d,
-            depth: 0,
-            metadata: root_metadata,
-            followed_dir_ids,
-            parent: Some(outer.clone()),
+    let root = Arc::new(PendingDir {
+        dir: d,
+        depth: 0,
+        metadata: root_metadata,
+        followed_dir_ids,
+        parent: Some(outer.clone()),
         // Sentinel +1: ensures subdirectory tasks can't bubble through
         // finalize_chain until the root's own scan is done.
         pending: AtomicUsize::new(1),

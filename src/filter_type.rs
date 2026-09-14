@@ -146,10 +146,7 @@ mod tests {
     #[test]
     fn test_zero_lines_shows_nothing() {
         // -t -n 0 used to clamp 0 up to 1 row
-        let nodes = vec![
-            file_node("Cargo.toml", 40),
-            file_node("README.md", 30),
-        ];
+        let nodes = vec![file_node("Cargo.toml", 40), file_node("README.md", 30)];
         let tree = get_all_file_types(&nodes, 0, None);
         assert_eq!(tree.children, vec![]);
         assert_eq!(tree.size, 0);
