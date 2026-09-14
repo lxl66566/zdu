@@ -31,7 +31,7 @@ use display_node::OUTPUT_TYPE;
 use filter::{AggregateData, get_biggest};
 use filter_type::get_all_file_types;
 use progress::PIndicator;
-use regex::{Error, Regex};
+use regex::Regex;
 use terminal_size::{Height, Width, terminal_size};
 use utils::{canonicalize_absolute_path, get_filesystem_devices, simplify_dir_names};
 
@@ -175,16 +175,23 @@ fn main() {
     };
 
     let ignore_from_file_result = match options.ignore_all_in_file {
-        Some(ref val) => read_to_string(val)
-            .unwrap()
-            .lines()
-            .map(Regex::new)
-            .collect::<Vec<Result<Regex, Error>>>(),
+        Some(ref val) => match read_to_string(val) {
+            Ok(content) => content.lines().map(Regex::new).collect::<Vec<_>>(),
+            Err(e) => {
+                eprintln!("Failed to read ignore file '{val}': {e}");
+                process::exit(1)
+            },
+        },
         None => vec![],
     };
     let ignore_from_file = ignore_from_file_result
         .into_iter()
-        .filter_map(Result::ok)
+        .filter_map(|result| {
+            // Warn on bad regex lines instead of silently dropping them
+            result
+                .map_err(|e| eprintln!("Ignoring invalid regex in ignore file: {e}"))
+                .ok()
+        })
         .collect::<Vec<Regex>>();
 
     let invert_filter_regexs = invert_filter_regexs
