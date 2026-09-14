@@ -5,6 +5,10 @@ use clap::{Parser, ValueEnum, ValueHint};
 // For single thread mode set this variable on your command line:
 // export RAYON_NUM_THREADS=1
 
+/// Upper bound for --terminal_width: far beyond any real terminal, keeps the
+/// percent-bar allocation sane (pdu BUG-4 analog)
+pub const MAX_TERMINAL_WIDTH: usize = 10_000;
+
 /// Like du but more intuitive
 #[derive(Debug, Parser)]
 // CLI flags map 1:1 to command line switches; boolean options are inherent here
@@ -129,7 +133,15 @@ pub struct Cli {
     pub file_types: bool,
 
     /// Specify width of output overriding the auto detection of terminal width
-    #[arg(short('w'), long, value_name("WIDTH"))]
+    // Bounded (pdu BUG-4 analog): draw_it allocates a percent bar string of
+    // this width, so an unbounded -w can exhaust memory with a single flag
+    #[arg(
+        short('w'),
+        long,
+        value_name("WIDTH"),
+        value_parser = clap::builder::RangedI64ValueParser::<usize>::new()
+            .range(..=(MAX_TERMINAL_WIDTH as i64))
+    )]
     pub terminal_width: Option<usize>,
 
     /// Disable the progress indication.
@@ -273,4 +285,20 @@ pub enum FileTime {
     /// last modified time
     #[value(name = "m", alias("modified"))]
     Modified,
+}
+
+#[cfg(test)]
+mod tests {
+    use clap::Parser;
+
+    use super::Cli;
+
+    #[test]
+    fn terminal_width_is_bounded() {
+        // pdu BUG-4 analog: an unbounded -w makes draw_it allocate a percent
+        // bar of that width; oversized values must be rejected at parse time
+        assert!(Cli::try_parse_from(["zdu", "-w", "10000"]).is_ok());
+        assert!(Cli::try_parse_from(["zdu", "-w", "10001"]).is_err());
+        assert!(Cli::try_parse_from(["zdu", "-w", "100000000000000000"]).is_err());
+    }
 }
