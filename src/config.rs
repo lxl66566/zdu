@@ -187,15 +187,16 @@ impl Config {
     }
 
     pub fn get_modified_time_operator(options: &Cli) -> Option<(Operator, i64)> {
-        get_filter_time_operator(options.mtime.as_ref(), get_current_date_epoch_seconds())
+        // Lazily evaluated: only computes midnight when a time filter is given
+        get_filter_time_operator(options.mtime.as_ref(), get_current_date_epoch_seconds)
     }
 
     pub fn get_accessed_time_operator(options: &Cli) -> Option<(Operator, i64)> {
-        get_filter_time_operator(options.atime.as_ref(), get_current_date_epoch_seconds())
+        get_filter_time_operator(options.atime.as_ref(), get_current_date_epoch_seconds)
     }
 
     pub fn get_changed_time_operator(options: &Cli) -> Option<(Operator, i64)> {
-        get_filter_time_operator(options.ctime.as_ref(), get_current_date_epoch_seconds())
+        get_filter_time_operator(options.ctime.as_ref(), get_current_date_epoch_seconds)
     }
 
     pub fn get_collapse(&self, options: &Cli) -> Option<Vec<String>> {
@@ -213,16 +214,21 @@ fn get_current_date_epoch_seconds() -> i64 {
     let now = Local::now();
     let current_date = now.date_naive();
 
-    let current_date_time = current_date.and_hms_opt(0, 0, 0).unwrap();
-    Local
-        .from_local_datetime(&current_date_time)
-        .unwrap()
-        .timestamp()
+    let midnight = current_date.and_hms_opt(0, 0, 0).unwrap();
+    match Local.from_local_datetime(&midnight) {
+        // DST gap (LocalResult::None) or fold (Ambiguous): fall back to the
+        // day's UTC midnight instead of panicking, which used to make every
+        // zdu invocation crash for the whole day in DST-transition timezones
+        chrono::LocalResult::Single(dt) | chrono::LocalResult::Ambiguous(dt, _) => dt.timestamp(),
+        chrono::LocalResult::None => midnight.and_utc().timestamp(),
+    }
 }
 
 fn get_filter_time_operator(
     option_value: Option<&String>,
-    current_date_epoch_seconds: i64,
+    // Called only when a time filter is present, so the (slightly costly)
+    // midnight computation is skipped for plain runs
+    current_date_epoch_seconds: impl FnOnce() -> i64,
 ) -> Option<(Operator, i64)> {
     match option_value {
         Some(val) => {
@@ -230,7 +236,7 @@ fn get_filter_time_operator(
                 eprintln!("Invalid value for time filter: {val:?}");
                 process::exit(1)
             });
-            let time = current_date_epoch_seconds - days.abs() * DAY_SECONDS;
+            let time = current_date_epoch_seconds() - days.abs() * DAY_SECONDS;
             // the parse above rejects an empty string, so there is a first char
             match val.chars().next().unwrap_or_else(|| {
                 eprintln!("Invalid value for time filter: {val:?}");
