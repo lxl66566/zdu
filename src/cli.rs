@@ -191,7 +191,9 @@ pub struct Cli {
 
     /// Directory 'size' is max filetime of child files instead of disk size.
     /// while a/c/m for last accessed/changed/modified time
-    #[arg(short('m'), long, value_enum)]
+    // Combining -f with -m corrupts output: filecount wins per-file (size=1)
+    // but filetime's max-aggregation then collapses every directory to 1.
+    #[arg(short('m'), long, value_enum, conflicts_with("filecount"))]
     pub filetime: Option<FileTime>,
 }
 

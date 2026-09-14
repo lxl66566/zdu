@@ -477,6 +477,13 @@ mod tests {
     }
 
     #[test]
+    fn test_filetime_conflicts_with_filecount() {
+        // BUG-6 regression: -f + -m produced meaningless all-1 output
+        let result = Cli::try_parse_from(vec!["zdu", "-f", "--filetime", "m"]);
+        assert!(result.is_err(), "-f and -m must conflict");
+    }
+
+    #[test]
     fn test_get_number_of_lines() {
         // No config and no flag.
         let c = Config::default();
