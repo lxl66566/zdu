@@ -71,12 +71,17 @@ pub fn get_metadata<P: AsRef<Path>>(
     }
 }
 
+// Shared Windows metadata gate: decides whether `md` (fetched either from a
+// path stat or for free from directory enumeration) is trustworthy without
+// opening the file handle.
 #[cfg(target_family = "windows")]
-pub fn get_metadata<P: AsRef<Path>>(
-    path: P,
+fn metadata_from(
+    md: &fs::Metadata,
+    path: &Path,
     use_apparent_size: bool,
-    follow_links: bool,
 ) -> Option<(u64, Option<InodeAndDevice>, FileTime)> {
+    use std::os::windows::fs::MetadataExt;
+
     // On windows opening the file to get size, file ID and volume can be very
     // expensive because 1) it causes a few system calls, and more importantly 2) it can cause
     // windows defender to scan the file.
@@ -113,114 +118,136 @@ pub fn get_metadata<P: AsRef<Path>>(
     // Consistently opening the file: 30 minutes.
     // With this optimization:         8 sec.
 
-    use std::io;
-
-    use winapi_util::Handle;
-    fn handle_from_path_limited(path: &Path) -> io::Result<Handle> {
-        use std::{fs::OpenOptions, os::windows::fs::OpenOptionsExt};
-        const FILE_READ_ATTRIBUTES: u32 = 0x0080;
-
-        // So, it seems that it does does have to be that expensive to open
-        // files to get their info: Avoiding opening the file with the full
-        // GENERIC_READ is key:
-
-        // https://docs.microsoft.com/en-us/windows/win32/secauthz/generic-access-rights:
-        // "For example, a Windows file object maps the GENERIC_READ bit to the
-        // READ_CONTROL and SYNCHRONIZE standard access rights and to the
-        // FILE_READ_DATA, FILE_READ_EA, and FILE_READ_ATTRIBUTES
-        // object-specific access rights"
-
-        // The flag FILE_READ_DATA seems to be the expensive one, so we'll avoid
-        // that, and a most of the other ones. Simply because it seems that we
-        // don't need them.
-
-        let file = OpenOptions::new()
-            .access_mode(FILE_READ_ATTRIBUTES)
-            .open(path)?;
-        Ok(Handle::from_file(file))
+    const FILE_ATTRIBUTE_ARCHIVE: u32 = 0x20;
+    const FILE_ATTRIBUTE_READONLY: u32 = 0x01;
+    const FILE_ATTRIBUTE_HIDDEN: u32 = 0x02;
+    const FILE_ATTRIBUTE_SYSTEM: u32 = 0x04;
+    const FILE_ATTRIBUTE_NORMAL: u32 = 0x80;
+    const FILE_ATTRIBUTE_DIRECTORY: u32 = 0x10;
+    const FILE_ATTRIBUTE_SPARSE_FILE: u32 = 0x0000_0200;
+    const FILE_ATTRIBUTE_PINNED: u32 = 0x0008_0000;
+    const FILE_ATTRIBUTE_UNPINNED: u32 = 0x0010_0000;
+    const FILE_ATTRIBUTE_RECALL_ON_OPEN: u32 = 0x0004_0000;
+    const FILE_ATTRIBUTE_RECALL_ON_DATA_ACCESS: u32 = 0x0040_0000;
+    const FILE_ATTRIBUTE_OFFLINE: u32 = 0x0000_1000;
+    // normally FILE_ATTRIBUTE_SPARSE_FILE would be enough, however Windows sometimes likes to mask it out. see: https://stackoverflow.com/q/54560454
+    const IS_PROBABLY_ONEDRIVE: u32 = FILE_ATTRIBUTE_SPARSE_FILE
+        | FILE_ATTRIBUTE_PINNED
+        | FILE_ATTRIBUTE_UNPINNED
+        | FILE_ATTRIBUTE_RECALL_ON_OPEN
+        | FILE_ATTRIBUTE_RECALL_ON_DATA_ACCESS
+        | FILE_ATTRIBUTE_OFFLINE;
+    let attr_filtered = md.file_attributes()
+        & !(FILE_ATTRIBUTE_HIDDEN | FILE_ATTRIBUTE_READONLY | FILE_ATTRIBUTE_SYSTEM);
+    if ((attr_filtered & FILE_ATTRIBUTE_ARCHIVE) != 0
+        || (attr_filtered & FILE_ATTRIBUTE_DIRECTORY) != 0
+        || md.file_attributes() == FILE_ATTRIBUTE_NORMAL)
+        && !((attr_filtered & IS_PROBABLY_ONEDRIVE != 0) && use_apparent_size)
+    {
+        Some((
+            md.len(),
+            None,
+            (
+                filetime_to_unix_seconds(md.last_write_time()),
+                filetime_to_unix_seconds(md.last_access_time()),
+                filetime_to_unix_seconds(md.creation_time()),
+            ),
+        ))
+    } else {
+        get_metadata_expensive(path, use_apparent_size)
     }
+}
 
-    fn get_metadata_expensive(
-        path: &Path,
-        use_apparent_size: bool,
-    ) -> Option<(u64, Option<InodeAndDevice>, FileTime)> {
-        use winapi_util::file::information;
+#[cfg(target_family = "windows")]
+fn get_metadata_expensive(
+    path: &Path,
+    use_apparent_size: bool,
+) -> Option<(u64, Option<InodeAndDevice>, FileTime)> {
+    use std::{fs::OpenOptions, os::windows::fs::OpenOptionsExt};
 
-        let h = handle_from_path_limited(path).ok()?;
-        let info = information(&h).ok()?;
+    use winapi_util::{Handle, file::information};
 
-        if use_apparent_size {
-            use filesize::PathExt;
-            Some((
-                path.size_on_disk().ok()?,
-                Some((info.file_index(), info.volume_serial_number())),
-                (
-                    filetime_to_unix_seconds(info.last_write_time().unwrap()),
-                    filetime_to_unix_seconds(info.last_access_time().unwrap()),
-                    filetime_to_unix_seconds(info.creation_time().unwrap()),
-                ),
-            ))
-        } else {
-            Some((
-                info.file_size(),
-                Some((info.file_index(), info.volume_serial_number())),
-                (
-                    filetime_to_unix_seconds(info.last_write_time().unwrap()),
-                    filetime_to_unix_seconds(info.last_access_time().unwrap()),
-                    filetime_to_unix_seconds(info.creation_time().unwrap()),
-                ),
-            ))
-        }
+    const FILE_READ_ATTRIBUTES: u32 = 0x0080;
+
+    // Opening with the full GENERIC_READ is the expensive part (defender
+    // scans); FILE_READ_ATTRIBUTES alone is cheap
+    // https://docs.microsoft.com/en-us/windows/win32/secauthz/generic-access-rights
+    let file = OpenOptions::new()
+        .access_mode(FILE_READ_ATTRIBUTES)
+        .open(path)
+        .ok()?;
+    let h = Handle::from_file(file);
+    let info = information(&h).ok()?;
+
+    if use_apparent_size {
+        use filesize::PathExt;
+        Some((
+            path.size_on_disk().ok()?,
+            Some((info.file_index(), info.volume_serial_number())),
+            (
+                filetime_to_unix_seconds(info.last_write_time().unwrap()),
+                filetime_to_unix_seconds(info.last_access_time().unwrap()),
+                filetime_to_unix_seconds(info.creation_time().unwrap()),
+            ),
+        ))
+    } else {
+        Some((
+            info.file_size(),
+            Some((info.file_index(), info.volume_serial_number())),
+            (
+                filetime_to_unix_seconds(info.last_write_time().unwrap()),
+                filetime_to_unix_seconds(info.last_access_time().unwrap()),
+                filetime_to_unix_seconds(info.creation_time().unwrap()),
+            ),
+        ))
     }
+}
 
-    use std::os::windows::fs::MetadataExt;
+#[cfg(target_family = "windows")]
+pub fn get_metadata<P: AsRef<Path>>(
+    path: P,
+    use_apparent_size: bool,
+    follow_links: bool,
+) -> Option<(u64, Option<InodeAndDevice>, FileTime)> {
     let path = path.as_ref();
     let metadata = if follow_links {
         path.metadata()
     } else {
         path.symlink_metadata()
     };
-    match metadata {
-        Ok(ref md) => {
-            const FILE_ATTRIBUTE_ARCHIVE: u32 = 0x20;
-            const FILE_ATTRIBUTE_READONLY: u32 = 0x01;
-            const FILE_ATTRIBUTE_HIDDEN: u32 = 0x02;
-            const FILE_ATTRIBUTE_SYSTEM: u32 = 0x04;
-            const FILE_ATTRIBUTE_NORMAL: u32 = 0x80;
-            const FILE_ATTRIBUTE_DIRECTORY: u32 = 0x10;
-            const FILE_ATTRIBUTE_SPARSE_FILE: u32 = 0x0000_0200;
-            const FILE_ATTRIBUTE_PINNED: u32 = 0x0008_0000;
-            const FILE_ATTRIBUTE_UNPINNED: u32 = 0x0010_0000;
-            const FILE_ATTRIBUTE_RECALL_ON_OPEN: u32 = 0x0004_0000;
-            const FILE_ATTRIBUTE_RECALL_ON_DATA_ACCESS: u32 = 0x0040_0000;
-            const FILE_ATTRIBUTE_OFFLINE: u32 = 0x0000_1000;
-            // normally FILE_ATTRIBUTE_SPARSE_FILE would be enough, however Windows sometimes likes to mask it out. see: https://stackoverflow.com/q/54560454
-            const IS_PROBABLY_ONEDRIVE: u32 = FILE_ATTRIBUTE_SPARSE_FILE
-                | FILE_ATTRIBUTE_PINNED
-                | FILE_ATTRIBUTE_UNPINNED
-                | FILE_ATTRIBUTE_RECALL_ON_OPEN
-                | FILE_ATTRIBUTE_RECALL_ON_DATA_ACCESS
-                | FILE_ATTRIBUTE_OFFLINE;
-            let attr_filtered = md.file_attributes()
-                & !(FILE_ATTRIBUTE_HIDDEN | FILE_ATTRIBUTE_READONLY | FILE_ATTRIBUTE_SYSTEM);
-            if ((attr_filtered & FILE_ATTRIBUTE_ARCHIVE) != 0
-                || (attr_filtered & FILE_ATTRIBUTE_DIRECTORY) != 0
-                || md.file_attributes() == FILE_ATTRIBUTE_NORMAL)
-                && !((attr_filtered & IS_PROBABLY_ONEDRIVE != 0) && use_apparent_size)
-            {
-                Some((
-                    md.len(),
-                    None,
-                    (
-                        filetime_to_unix_seconds(md.last_write_time()),
-                        filetime_to_unix_seconds(md.last_access_time()),
-                        filetime_to_unix_seconds(md.creation_time()),
-                    ),
-                ))
-            } else {
-                get_metadata_expensive(path, use_apparent_size)
-            }
-        },
-        _ => get_metadata_expensive(path, use_apparent_size),
+    metadata
+        .ok()
+        .and_then(|md| metadata_from(&md, path, use_apparent_size))
+        .or_else(|| get_metadata_expensive(path, use_apparent_size))
+}
+
+// Entry-based variant: on Windows DirEntry::metadata() reuses the data from
+// directory enumeration (no extra syscall), unlike a path stat. Falls back to
+// the path-based path for followed links (target metadata differs from the
+// link entry's own).
+#[cfg(target_family = "windows")]
+pub fn get_entry_metadata(
+    entry: &fs::DirEntry,
+    use_apparent_size: bool,
+    follow_links: bool,
+) -> Option<(u64, Option<InodeAndDevice>, FileTime)> {
+    if follow_links {
+        return get_metadata(entry.path(), use_apparent_size, true);
     }
+    let path = entry.path();
+    entry
+        .metadata()
+        .ok()
+        .and_then(|md| metadata_from(&md, &path, use_apparent_size))
+        .or_else(|| get_metadata_expensive(&path, use_apparent_size))
+}
+
+// Unix DirEntry::metadata() still issues a syscall; no gain over the path form
+#[cfg(target_family = "unix")]
+pub fn get_entry_metadata(
+    entry: &fs::DirEntry,
+    use_apparent_size: bool,
+    follow_links: bool,
+) -> Option<(u64, Option<InodeAndDevice>, FileTime)> {
+    get_metadata(entry.path(), use_apparent_size, follow_links)
 }

@@ -16,7 +16,7 @@ use regex::Regex;
 
 use crate::{
     node::{EntryMetadata, FileTime, Node, build_node},
-    platform::get_metadata,
+    platform::{get_entry_metadata, get_metadata},
     progress::{ORDERING, Operation, PAtomicInfo, RuntimeErrors},
     utils::{
         is_filtered_out_due_to_file_time, is_filtered_out_due_to_invert_regex,
@@ -438,13 +438,14 @@ fn process_entry<'scope>(
 ) -> Option<Node> {
     // PERF-2/5: one path allocation and one metadata fetch per entry, shared
     // by the ignore checks, the followed-link device/cycle checks and node
-    // building (previously up to 2 opens + several stats per file)
+    // building (previously up to 2 opens + several stats per file).
+    // Entry-based fetch: on Windows this reuses readdir data (no stat syscall)
     let path = entry.path();
     let file_type = entry.file_type().ok()?;
     let is_symlink = file_type.is_symlink();
     let is_file = file_type.is_file();
     let follow = walk_data.follow_links && is_symlink;
-    let metadata = get_metadata(&path, walk_data.use_apparent_size, follow);
+    let metadata = get_entry_metadata(entry, walk_data.use_apparent_size, follow);
 
     if ignore_file(&path, is_file, metadata.as_ref(), canonical_dir, walk_data) {
         return None;
