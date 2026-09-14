@@ -128,19 +128,18 @@ impl Config {
     }
 
     pub fn get_min_size(&self, options: &Cli) -> Option<usize> {
-        let size_from_param = options.min_size.as_ref();
-        self.get_min_size_from(size_from_param)
+        self.get_min_size_from(options.min_size.as_ref())
     }
 
     fn get_min_size_from(&self, min_size: Option<&String>) -> Option<usize> {
-        let size_from_param = min_size.and_then(|a| convert_min_size(a));
-
-        if size_from_param.is_none() {
-            self.min_size
-                .as_ref()
-                .and_then(|a| convert_min_size(a.as_ref()))
-        } else {
-            size_from_param
+        match min_size {
+            // CLI wins: an explicitly invalid value is a user error, not a
+            // reason to silently fall back to the config value
+            Some(cli_val) => Some(parse_min_size(cli_val).unwrap_or_else(|| {
+                eprintln!("Invalid --min-size value: {cli_val:?}");
+                process::exit(1)
+            })),
+            None => self.min_size.as_ref().and_then(|c| convert_min_size(c)),
         }
     }
 
@@ -252,35 +251,46 @@ fn get_filter_time_operator(
 }
 
 fn convert_min_size(input: &str) -> Option<usize> {
-    let re = Regex::new(r"([0-9]+)(\w*)").unwrap();
-
-    if let Some(cap) = re.captures(input) {
-        let (_, [digits, letters]) = cap.extract();
-
-        // Failure to parse should be impossible due to regex match
-        let digits_as_usize: Option<usize> = digits.parse().ok();
-
-        match digits_as_usize {
-            Some(parsed_digits) => {
-                let number_format = get_number_format(&letters.to_lowercase());
-                match number_format {
-                    // try_from keeps this correct on 32-bit targets
-                    Some((multiple, _)) => Some(parsed_digits * usize::try_from(multiple).ok()?),
-                    None => {
-                        if letters.is_empty() {
-                            Some(parsed_digits)
-                        } else {
-                            eprintln!("Ignoring invalid min-size: {input}");
-                            None
-                        }
-                    },
-                }
-            },
-            None => None,
-        }
-    } else {
+    parse_min_size(input).or_else(|| {
+        eprintln!("Ignoring invalid min-size: {input}");
         None
+    })
+}
+
+fn parse_min_size(input: &str) -> Option<usize> {
+    // Anchored with optional decimals so "1.5k" no longer parses as 1 and
+    // garbage input is rejected wholesale
+    let re = Regex::new(r"^([0-9]+(?:\.[0-9]+)?)([a-zA-Z]*)$").unwrap();
+
+    let (_, [number, letters]) = re.captures(input).map(|c| c.extract())?;
+
+    let multiple: u128 = if letters.is_empty() {
+        1
+    } else {
+        let (multiple, _) = get_number_format(&letters.to_lowercase())?;
+        u128::from(multiple)
+    };
+
+    // Integer arithmetic with checked ops so oversized input errors out
+    // instead of overflowing (u128 has ample headroom for digit counts a
+    // usize string can produce)
+    let (int_part, frac_part) = match number.split_once('.') {
+        Some((i, f)) => (i, Some(f)),
+        None => (number, None),
+    };
+    let int_val: u128 = int_part.parse().ok()?;
+    let mut total = int_val.checked_mul(multiple)?;
+
+    if let Some(frac) = frac_part {
+        let frac_val: u128 = frac.parse().ok()?;
+        let denom = 10u128.checked_pow(u32::try_from(frac.len()).ok()?)?;
+        let numerator = frac_val
+            .checked_mul(multiple)
+            .and_then(|n| n.checked_add(denom / 2))?; // round half up
+        total = total.checked_add(numerator / denom)?;
     }
+
+    usize::try_from(total).ok()
 }
 
 fn get_config_locations(base: &Path, config_home: Option<&Path>) -> Vec<PathBuf> {
@@ -373,6 +383,14 @@ mod tests {
         assert_eq!(convert_min_size("10M"), Some(10 * 1024usize.pow(2)));
         assert_eq!(convert_min_size("10Mb"), Some(10 * 1000usize.pow(2)));
         assert_eq!(convert_min_size("2Gi"), Some(2 * 1024usize.pow(3)));
+        // Decimals are supported; anchored so garbage is rejected wholesale
+        assert_eq!(convert_min_size("1.5k"), Some(1536));
+        assert_eq!(convert_min_size("1.5Ki"), Some(1536));
+        assert_eq!(convert_min_size("0.5"), Some(1));
+        assert_eq!(convert_min_size("1k "), None);
+        assert_eq!(convert_min_size("k"), None);
+        // Overflows checked, not wrapped (regression: used to panic in debug)
+        assert_eq!(convert_min_size("9999999999999999999k"), None);
     }
 
     #[test]
