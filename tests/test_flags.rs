@@ -462,6 +462,13 @@ pub fn test_pre_epoch_filetime_is_displayed_correctly() {
 }
 
 #[test]
+pub fn test_dim_does_not_emit_ansi_when_colors_off() {
+    // BUG-11 regression: --dim leaked ESC[90m escapes into piped output
+    let output = build_command(vec!["-c", "--dim", "tests/test_dir/"]);
+    assert!(!output.contains('\x1b'), "{output}");
+}
+
+#[test]
 pub fn test_json_with_filetime_outputs_integer_timestamp() {
     // BUG-10 regression: size used to be a human-readable string like "1.7Gi"
     let temp_dir = tempfile::tempdir().unwrap();

@@ -13,7 +13,7 @@ use std::{
     path::Path,
 };
 
-use chrono::{DateTime, Local, TimeZone, Utc};
+use chrono::{Local, TimeZone, Utc};
 use lscolors::{LsColors, Style};
 use nu_ansi_term::Color::{DarkGray, Red};
 use stfu8::encode_u8;
@@ -384,7 +384,9 @@ fn get_name_percent(
     } else if !bar_chart.is_empty() {
         let percent = display_data.percent_size(node) * 100.0;
         let percent_size_str = format!("{percent:.0}%");
-        let colored_bar = if display_data.initial.dim {
+        // BUG-11: gate on colors_on so --dim doesn't leak ANSI escapes into
+        // piped/NO_COLOR output (mirrors the Red.paint gate in get_pretty_size)
+        let colored_bar = if display_data.initial.dim && display_data.initial.colors_on {
             format!("{}", DarkGray.paint(bar_chart))
         } else {
             bar_chart.to_string()
@@ -407,7 +409,12 @@ fn get_pretty_size(node: &DisplayNode, is_biggest: bool, display_data: &DisplayD
     } else {
         human_readable_number(node.size, &display_data.initial.output_format)
     };
-    let spaces_to_add = display_data.num_chars_needed_on_left_most - output.chars().count();
+    // BUG-12: filetime strings can exceed the 19-char column assumption for
+    // extreme dates; saturate instead of underflowing
+    let spaces_to_add =
+        display_data
+            .num_chars_needed_on_left_most
+            .saturating_sub(output.chars().count());
     let output = " ".repeat(spaces_to_add) + output.as_str();
 
     if is_biggest && display_data.initial.colors_on {
@@ -418,7 +425,17 @@ fn get_pretty_size(node: &DisplayNode, is_biggest: bool, display_data: &DisplayD
 }
 
 fn get_pretty_file_modified_time(timestamp: i64) -> String {
-    let datetime: DateTime<Utc> = Utc.timestamp_opt(timestamp, 0).unwrap();
+    // BUG-12: NTFS timestamps can reach ~year 60000, beyond chrono's
+    // NaiveDateTime range; clamp into the representable range instead of
+    // panicking in timestamp_opt().unwrap()
+    let ts = timestamp.clamp(
+        chrono::NaiveDateTime::MIN.and_utc().timestamp(),
+        chrono::NaiveDateTime::MAX.and_utc().timestamp(),
+    );
+    let datetime = Utc
+        .timestamp_opt(ts, 0)
+        .single()
+        .expect("clamped to NaiveDateTime range");
 
     let local_datetime = datetime.with_timezone(&Local);
 
@@ -781,5 +798,13 @@ mod tests {
         let expected_output = local_dt.format("%Y-%m-%dT%H:%M:%S").to_string();
 
         assert_eq!(get_pretty_file_modified_time(timestamp), expected_output);
+    }
+
+    // BUG-12 regression: extreme timestamps must clamp, not panic
+    #[test]
+    fn test_get_pretty_file_modified_time_extremes() {
+        for ts in [i64::MIN, i64::MAX, i64::MIN / 2, i64::MAX / 2] {
+            assert_ne!(get_pretty_file_modified_time(ts), "");
+        }
     }
 }
