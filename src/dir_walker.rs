@@ -275,12 +275,21 @@ fn walk_dir<'scope>(
     if pending.dir.is_dir() {
         // EINTR is the only retryable error. Looping iteratively (rather than
         // recursing on retry, like the old code) keeps stack depth O(1).
+        // A directory gives up after MAX_EINTR_RETRIES retries: some
+        // network/virtual filesystems return Interrupted forever, and without
+        // a cap the walk would spin indefinitely (upstream v1.2.5 semantics).
+        const MAX_EINTR_RETRIES: u32 = 999;
+        let mut eintr_retries = 0u32;
         loop {
             let entries = match fs::read_dir(&pending.dir) {
                 Ok(entries) => entries,
                 Err(ref failed) => {
                     record_error(failed, &pending.dir, walk_data);
                     if is_retryable(failed) {
+                        eintr_retries += 1;
+                        if eintr_retries > MAX_EINTR_RETRIES {
+                            break;
+                        }
                         continue;
                     }
                     break;
@@ -294,17 +303,20 @@ fn walk_dir<'scope>(
             let collected: Vec<_> = entries.collect();
 
             // If any entry yielded a retryable error, throw the Vec away and
-            // re-list. We record only that one error (which bumps the EINTR
-            // counter and trips a panic threshold if retries are runaway);
-            // other errors aren't recorded yet because they'll resurface on
-            // retry if they're real, and recording them now would log
-            // phantoms when the retry succeeds cleanly.
+            // re-list. We record only that one error (it bumps the shared
+            // EINTR counter); other errors aren't recorded yet because they'll
+            // resurface on retry if they're real, and recording them now
+            // would log phantoms when the retry succeeds cleanly.
             if let Some(failed) = collected
                 .iter()
                 .filter_map(|r| r.as_ref().err())
                 .find(|e| is_retryable(e))
             {
                 record_error(failed, &pending.dir, walk_data);
+                eintr_retries += 1;
+                if eintr_retries > MAX_EINTR_RETRIES {
+                    break;
+                }
                 continue;
             }
 
