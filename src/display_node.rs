@@ -66,8 +66,32 @@ impl Serialize for DisplayNode {
                 state.serialize_field("size", &human_readable_number(self.size, fmt))
             },
         })?;
-        state.serialize_field("name", &self.name)?;
+        // PathBuf serialization fails on non-UTF-8 paths; emit lossy instead
+        // (pdu BUG-5 lesson: -j must never panic on invalid UTF-8 names)
+        state.serialize_field("name", &self.name.to_string_lossy())?;
         state.serialize_field("children", &self.children)?;
         state.end()
+    }
+}
+
+// The non-UTF-8 name construction needs OsStr::from_bytes, unix-only; on
+// Windows invalid-UTF-8 OsStr cannot be built portably in tests.
+#[cfg(unix)]
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn json_serialization_is_lossy_for_non_utf8_names() {
+        use std::os::unix::ffi::OsStrExt;
+        let node = DisplayNode {
+            size: 10,
+            name: PathBuf::from(std::ffi::OsStr::from_bytes(b"\xffbad")),
+            children: vec![],
+        };
+        // must not panic / error on invalid UTF-8 (pdu BUG-5 lesson)
+        let json = serde_json::to_string(&node).expect("lossy serialization");
+        assert!(json.contains("name"));
     }
 }
