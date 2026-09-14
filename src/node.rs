@@ -25,6 +25,21 @@ pub enum FileTime {
     Changed,
 }
 
+// BUG-7: timestamps keep their sign. `Node.size` stays u64 (shared with byte
+// sizes / file counts), so filetime values are stored through an
+// order-preserving bijection i64 -> u64 (sign-bit flip): u64 ordering then
+// matches chronological ordering for max-aggregation and sorting, and
+// display/JSON decode back to the true i64.
+#[allow(clippy::cast_sign_loss, clippy::cast_possible_wrap)]
+pub fn encode_filetime(t: i64) -> u64 {
+    (t as u64) ^ (1_u64 << 63)
+}
+
+#[allow(clippy::cast_sign_loss, clippy::cast_possible_wrap)]
+pub fn decode_filetime(size: u64) -> i64 {
+    (size ^ (1_u64 << 63)) as i64
+}
+
 impl From<crate::cli::FileTime> for FileTime {
     fn from(time: crate::cli::FileTime) -> Self {
         match time {
@@ -73,9 +88,9 @@ pub fn build_node(
             1
         } else if by_filetime.is_some() {
             match by_filetime {
-                Some(FileTime::Modified) => data.2.0.unsigned_abs(),
-                Some(FileTime::Accessed) => data.2.1.unsigned_abs(),
-                Some(FileTime::Changed) => data.2.2.unsigned_abs(),
+                Some(FileTime::Modified) => encode_filetime(data.2.0),
+                Some(FileTime::Accessed) => encode_filetime(data.2.1),
+                Some(FileTime::Changed) => encode_filetime(data.2.2),
                 None => unreachable!(),
             }
         } else {
@@ -110,5 +125,31 @@ impl Ord for Node {
 impl PartialOrd for Node {
     fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
         Some(self.cmp(other))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use chrono::TimeZone;
+
+    use super::*;
+
+    #[test]
+    fn test_filetime_encoding_preserves_order_and_sign() {
+        // BUG-7 regression: unsigned_abs mirrored pre-1970 times around the
+        // epoch; the sign-bit flip must be a bijection preserving i64 order
+        assert_eq!(decode_filetime(encode_filetime(0)), 0);
+        assert_eq!(decode_filetime(encode_filetime(i64::MIN)), i64::MIN);
+        assert_eq!(decode_filetime(encode_filetime(i64::MAX)), i64::MAX);
+
+        let pre1970 = chrono::Local
+            .with_ymd_and_hms(1969, 6, 15, 0, 0, 0)
+            .unwrap()
+            .timestamp();
+        let post1970 = 1_000_000_000;
+        assert!(pre1970 < 0);
+        assert!(encode_filetime(pre1970) < encode_filetime(0));
+        assert!(encode_filetime(0) < encode_filetime(post1970));
+        assert_eq!(decode_filetime(encode_filetime(pre1970)), pre1970);
     }
 }

@@ -20,7 +20,7 @@ use stfu8::encode_u8;
 use thousands::Separable;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
-use crate::{display_node::DisplayNode, node::FileTime};
+use crate::{display_node::DisplayNode, node::{FileTime, decode_filetime}};
 
 pub static SI_UNITS: [&str; 5] = ["P", "T", "G", "M", "K"];
 pub static IEC_UNITS: [&str; 5] = ["Pi", "Ti", "Gi", "Mi", "Ki"];
@@ -399,7 +399,7 @@ fn get_pretty_size(node: &DisplayNode, is_biggest: bool, display_data: &DisplayD
     let output = if display_data.initial.by_filecount {
         node.size.separate_with_commas()
     } else if display_data.initial.by_filetime.is_some() {
-        get_pretty_file_modified_time(node.size as i64)
+        get_pretty_file_modified_time(decode_filetime(node.size))
     } else {
         human_readable_number(node.size, &display_data.initial.output_format)
     };

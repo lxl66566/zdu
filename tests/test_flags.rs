@@ -407,10 +407,6 @@ pub fn test_collapse() {
     assert!(!output.contains("hello_file"));
 }
 
-// Unix only: on windows the metadata time is a FILETIME (100ns ticks since
-// 1601), not a unix epoch, so `-m` panics in get_pretty_file_modified_time.
-// That is pre-existing and unrelated to this fix.
-#[cfg(target_family = "unix")]
 #[test]
 pub fn test_show_files_by_type_with_filetime() {
     // When grouping by file type and showing file times, the 'size' of a group is
@@ -423,7 +419,7 @@ pub fn test_show_files_by_type_with_filetime() {
     let dir = tempfile::Builder::new().tempdir().unwrap();
 
     // Midday UTC, so the year is the same in every timezone
-    for epoch_seconds in [1593604800, 1625140800, 1656676800] {
+    for epoch_seconds in [1_593_604_800, 1_625_140_800, 1_656_676_800] {
         let file = File::create(dir.path().join(format!("{epoch_seconds}.log"))).unwrap();
         file.set_modified(UNIX_EPOCH + Duration::from_secs(epoch_seconds))
             .unwrap();
@@ -435,6 +431,34 @@ pub fn test_show_files_by_type_with_filetime() {
     assert!(output.contains("2022-07-0"), "{output}");
     assert!(!output.contains("2020-07-0"), "{output}");
     assert!(!output.contains("2021-07-0"), "{output}");
+}
+
+#[test]
+pub fn test_pre_epoch_filetime_is_displayed_correctly() {
+    // BUG-7 regression: a 1969 mtime used to be mirrored around the epoch and
+    // displayed as a 1970 date
+    use chrono::TimeZone;
+
+    let temp_dir = tempfile::tempdir().unwrap();
+    let file_path = temp_dir.path().join("old.txt");
+    std::fs::write(&file_path, b"old").unwrap();
+
+    let date = Local.with_ymd_and_hms(1969, 6, 15, 12, 0, 0).unwrap();
+    let file = OpenOptions::new().write(true).open(&file_path).unwrap();
+    file.set_times(FileTimes::new().set_modified(date.into()))
+        .unwrap();
+
+    let output = build_command(vec![
+        "-c",
+        "-m",
+        "m",
+        "-n",
+        "10",
+        temp_dir.path().to_str().unwrap(),
+    ]);
+
+    assert!(output.contains("1969-06-15"), "{output}");
+    assert!(!output.contains("1970-"), "{output}");
 }
 
 #[test]
