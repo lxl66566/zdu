@@ -231,11 +231,16 @@ fn get_filter_time_operator(
 ) -> Option<(Operator, i64)> {
     match option_value {
         Some(val) => {
-            let days = val.parse::<i64>().unwrap_or_else(|_| {
+            let invalid = || {
                 eprintln!("Invalid value for time filter: {val:?}");
                 process::exit(1)
-            });
-            let time = current_date_epoch_seconds() - days.abs() * DAY_SECONDS;
+            };
+            let days = val.parse::<i64>().unwrap_or_else(|_| invalid());
+            // i64::MIN cannot be negated; reject instead of overflowing
+            let days = days.checked_abs().unwrap_or_else(invalid);
+            let time = current_date_epoch_seconds()
+                .checked_sub(days.checked_mul(DAY_SECONDS).unwrap_or_else(invalid))
+                .unwrap_or_else(invalid);
             // the parse above rejects an empty string, so there is a first char
             match val.chars().next().unwrap_or_else(|| {
                 eprintln!("Invalid value for time filter: {val:?}");
