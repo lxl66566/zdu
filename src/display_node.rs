@@ -3,6 +3,7 @@ use std::{cell::RefCell, path::PathBuf};
 use serde::{Serialize, Serializer, ser::SerializeStruct};
 
 use crate::display::human_readable_number;
+use crate::node::decode_filetime;
 
 #[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Clone)]
 pub struct DisplayNode {
@@ -28,25 +29,44 @@ impl DisplayNode {
     }
 }
 
+// How the `size` field is rendered in JSON output. An enum (rather than a
+// format string) makes the choice compile-time exhaustive.
+#[derive(Debug, Clone, PartialEq)]
+pub enum JsonSizeFormat {
+    /// human-readable string via human_readable_number, e.g. "1.7Gi"
+    Human(String),
+    /// raw integer file count (-f)
+    Count,
+    /// raw integer unix timestamp (-m); DisplayNode.size holds the
+    /// order-preserving encoding, decoded back to i64 here (BUG-10)
+    Timestamp,
+}
+
 // Only used for -j 'json' flag combined with -o 'output_type' flag
 // Used to pass the output_type into the custom Serde serializer
 thread_local! {
-    pub static OUTPUT_TYPE: RefCell<String> = const { RefCell::new(String::new()) };
+    pub static OUTPUT_TYPE: RefCell<JsonSizeFormat> =
+        const { RefCell::new(JsonSizeFormat::Human(String::new())) };
 }
 
-// We need the custom Serialize incase someone uses the -o flag to pass a custom output type in
-// (show size in Mb / Gb etc).
-// Sadly this also necessitates a global variable OUTPUT_TYPE as we can not pass the output_type
-// flag into the serialize method
+// We need the custom Serialize in case someone uses the -o flag to pass a
+// custom output type in (show size in Mb / Gb etc), or -f/-m which need raw
+// integers instead of human-readable strings.
+// Sadly this also necessitates a global variable OUTPUT_TYPE as we can not
+// pass the output_type flag into the serialize method
 impl Serialize for DisplayNode {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
     where
         S: Serializer,
     {
-        let readable_size = OUTPUT_TYPE
-            .with(|output_type| human_readable_number(self.size, output_type.borrow().as_str()));
-        let mut state = serializer.serialize_struct("DisplayNode", 2)?;
-        state.serialize_field("size", &(readable_size))?;
+        let mut state = serializer.serialize_struct("DisplayNode", 3)?;
+        OUTPUT_TYPE.with(|fmt| match &*fmt.borrow() {
+            JsonSizeFormat::Timestamp => state.serialize_field("size", &decode_filetime(self.size)),
+            JsonSizeFormat::Count => state.serialize_field("size", &self.size),
+            JsonSizeFormat::Human(fmt) => {
+                state.serialize_field("size", &human_readable_number(self.size, fmt))
+            },
+        })?;
         state.serialize_field("name", &self.name)?;
         state.serialize_field("children", &self.children)?;
         state.end()

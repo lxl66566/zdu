@@ -462,6 +462,32 @@ pub fn test_pre_epoch_filetime_is_displayed_correctly() {
 }
 
 #[test]
+pub fn test_json_with_filetime_outputs_integer_timestamp() {
+    // BUG-10 regression: size used to be a human-readable string like "1.7Gi"
+    let temp_dir = tempfile::tempdir().unwrap();
+    std::fs::write(temp_dir.path().join("f.txt"), b"x").unwrap();
+
+    let output = build_command(vec![
+        "-c",
+        "-j",
+        "-m",
+        "m",
+        "-d",
+        "0",
+        temp_dir.path().to_str().unwrap(),
+    ]);
+
+    let json: serde_json::Value = serde_json::from_str(output.trim()).unwrap();
+    assert!(
+        json["size"].is_i64(),
+        "expected integer size, got: {}",
+        json["size"]
+    );
+    // Sanity: decodes to a plausible unix timestamp
+    assert!(json["size"].as_i64().unwrap() > 1_000_000_000);
+}
+
+#[test]
 pub fn test_handle_duplicate_names() {
     // Check that even if we run on a multiple directories with the same name
     // we still show the distinct parent dir in the output

@@ -27,7 +27,7 @@ use clap::Parser;
 use config::get_config;
 use dir_walker::{WalkData, walk_it};
 use display::InitialDisplayData;
-use display_node::OUTPUT_TYPE;
+use display_node::{JsonSizeFormat, OUTPUT_TYPE};
 use filter::{AggregateData, get_biggest};
 use filter_type::get_all_file_types;
 use progress::PIndicator;
@@ -330,10 +330,14 @@ fn print_output(
 
     if config.get_output_json(options) {
         OUTPUT_TYPE.with(|wrapped| {
-            if by_filecount {
-                wrapped.replace("count".to_string());
+            // -m: raw integer timestamps (BUG-10); -f: raw integer counts;
+            // otherwise human-readable sizes per the output format
+            if options.filetime.is_some() {
+                wrapped.replace(JsonSizeFormat::Timestamp);
+            } else if by_filecount {
+                wrapped.replace(JsonSizeFormat::Count);
             } else {
-                wrapped.replace(output_format);
+                wrapped.replace(JsonSizeFormat::Human(output_format));
             }
         });
         println!("{}", serde_json::to_string(&tree).unwrap());
