@@ -117,7 +117,15 @@ pub struct Cli {
     pub filter: Option<Vec<String>>,
 
     /// show only these file types
-    #[arg(short('t'), long, conflicts_with("depth"), conflicts_with("only_dir"))]
+    // -F is meaningless here (extension aggregation ignores only_file);
+    // reject instead of silently ignoring it
+    #[arg(
+        short('t'),
+        long,
+        conflicts_with("depth"),
+        conflicts_with("only_dir"),
+        conflicts_with("only_file")
+    )]
     pub file_types: bool,
 
     /// Specify width of output overriding the auto detection of terminal width

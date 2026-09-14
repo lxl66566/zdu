@@ -12,6 +12,11 @@ use crate::{cli::Cli, dir_walker::Operator, display::get_number_format, node::Fi
 
 pub static DAY_SECONDS: i64 = 24 * 60 * 60;
 
+// Mirrors the OutputFormat ValueEnum (plus its aliases and the empty default)
+const VALID_OUTPUT_FORMATS: [&str; 15] = [
+    "", "si", "b", "k", "m", "g", "t", "kb", "mb", "gb", "tb", "kib", "mib", "gib", "tib",
+];
+
 #[derive(Deserialize, Default)]
 #[serde(rename_all = "kebab-case")]
 pub struct Config {
@@ -100,8 +105,22 @@ impl Config {
         (match out_fmt {
             None => match &self.output_format {
                 None => String::new(),
-                Some(x) => x.clone(),
+                Some(x) => {
+                    let x = x.to_lowercase();
+                    // Strict validation: without it "banana" prefix-matches the
+                    // 'b' rule and silently displays raw bytes
+                    if VALID_OUTPUT_FORMATS.contains(&x.as_str()) {
+                        x
+                    } else {
+                        eprintln!(
+                            "Invalid output-format in config file: {x:?} \
+                             (valid: si, b, k/kib, m/mib, g/gib, t/tib, kb, mb, gb, tb)"
+                        );
+                        process::exit(1)
+                    }
+                },
             },
+            // CLI side is a ValueEnum, always valid
             Some(x) => x.to_string(),
         })
         .to_lowercase()
@@ -328,10 +347,19 @@ pub fn get_config(conf_path: Option<&String>) -> Config {
                     .map(PathBuf::from);
 
                 for path in get_config_locations(&home, config_home.as_deref()) {
-                    if path.exists()
-                        && let Ok(config) = Config::from_config_file(&path)
-                    {
-                        return config;
+                    if path.exists() {
+                        // Same warning as an explicit --config: a present but
+                        // unparsable file must not fail silently
+                        match Config::from_config_file(&path) {
+                            Ok(config) => return config,
+                            Err(e) => {
+                                eprintln!(
+                                    "Ignoring invalid config file '{}': {}",
+                                    path.display(),
+                                    e
+                                );
+                            },
+                        }
                     }
                 }
             }
@@ -481,6 +509,29 @@ mod tests {
         // BUG-6 regression: -f + -m produced meaningless all-1 output
         let result = Cli::try_parse_from(vec!["zdu", "-f", "--filetime", "m"]);
         assert!(result.is_err(), "-f and -m must conflict");
+    }
+
+    #[test]
+    fn test_file_types_conflicts_with_only_file() {
+        // -t silently ignored -F; reject the combination instead
+        let result = Cli::try_parse_from(vec!["zdu", "-t", "-F"]);
+        assert!(result.is_err(), "-t and -F must conflict");
+    }
+
+    #[test]
+    fn test_output_format_validation() {
+        // CLI values always pass (ValueEnum)
+        let args = get_args(vec!["zdu", "-o", "gib"]);
+        // alias normalizes to the canonical "g" form
+        assert_eq!(Config::default().get_output_format(&args), "g");
+
+        // Valid config values pass case-insensitively; invalid ones exit(1)
+        // (not assertable in-process)
+        let c_ok = Config {
+            output_format: Some("KiB".to_owned()),
+            ..Default::default()
+        };
+        assert_eq!(c_ok.get_output_format(&get_args(vec!["zdu"])), "kib");
     }
 
     #[test]

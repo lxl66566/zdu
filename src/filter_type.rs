@@ -37,13 +37,10 @@ pub fn get_all_file_types(
     let mut ext_nodes_iter = ext_nodes.iter();
 
     // First, collect the first N - 1 nodes...
+    // n == 0 shows zero rows (previously clamped up to 1)
     let mut displayed: Vec<DisplayNode> = ext_nodes_iter
         .by_ref()
-        .take(if n > 1 {
-            n - 1
-        } else {
-            1
-        })
+        .take(n.saturating_sub(1))
         .map(|node| DisplayNode {
             name: PathBuf::from(node.extension.map_or_else(
                 || "(no extension)".to_owned(),
@@ -55,7 +52,7 @@ pub fn get_all_file_types(
         .collect();
 
     // ...then, aggregate the remaining nodes (if any) into a single  "(others)" node
-    if ext_nodes_iter.len() > 0 {
+    if n > 0 && ext_nodes_iter.len() > 0 {
         let actual_size = if by_filetime.is_some() {
             ext_nodes_iter.map(|node| node.size).max().unwrap_or(0)
         } else {
@@ -139,8 +136,20 @@ mod tests {
             .map(|c| (c.name.to_string_lossy().to_string(), c.size))
             .collect();
         assert_eq!(displayed, vec![
-            ("(others)".to_string(), 60),
-            (".toml".to_string(), 40)
+            ("(others)".to_owned(), 60),
+            (".toml".to_owned(), 40)
         ]);
+    }
+
+    #[test]
+    fn test_zero_lines_shows_nothing() {
+        // -t -n 0 used to clamp 0 up to 1 row
+        let nodes = vec![
+            file_node("Cargo.toml", 40),
+            file_node("README.md", 30),
+        ];
+        let tree = get_all_file_types(&nodes, 0, None);
+        assert_eq!(tree.children, vec![]);
+        assert_eq!(tree.size, 0);
     }
 }

@@ -109,15 +109,20 @@ fn main() {
     let options = Cli::parse();
     let config = get_config(options.config.as_ref());
 
-    let errors = RuntimeErrors::default();
-    let error_listen_for_ctrlc = Arc::new(Mutex::new(errors));
-    let errors_for_rayon = error_listen_for_ctrlc.clone();
+    // The ctrl-c handler just exits, so a single shared error sink suffices
+    let errors_for_rayon = Arc::new(Mutex::new(RuntimeErrors::default()));
 
     ctrlc::set_handler(move || {
         println!("\nAborting");
         process::exit(1);
     })
     .expect("Error setting Ctrl-C handler");
+
+    // clap only guards the command line; both keys set in the config file
+    // would silently resolve to files0_from
+    if config.files0_from.is_some() && config.files_from.is_some() {
+        eprintln!("Warning: config sets both files0-from and files-from; using files0-from");
+    }
 
     let target_dirs = if let Some(path) = config.get_files0_from(&options) {
         read_paths_from_source(&path, true)
