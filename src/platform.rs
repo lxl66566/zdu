@@ -1,6 +1,5 @@
 #[allow(unused_imports)]
 use std::fs;
-
 use std::path::Path;
 
 #[cfg(target_family = "unix")]
@@ -14,6 +13,8 @@ type InodeAndDevice = (u64, u64);
 type FileTime = (i64, i64, i64);
 
 #[cfg(target_family = "windows")]
+// the resulting timestamp always fits in i64 by construction
+#[allow(clippy::cast_possible_truncation)]
 fn filetime_to_unix_seconds(filetime: u64) -> i64 {
     const TICKS_PER_SECOND: i128 = 10_000_000;
     const UNIX_EPOCH_FILETIME: i128 = 116_444_736_000_000_000;
@@ -65,7 +66,7 @@ pub fn get_metadata<P: AsRef<Path>>(
                     (md.mtime(), md.atime(), md.ctime()),
                 ))
             }
-        }
+        },
         Err(_e) => None,
     }
 }
@@ -113,10 +114,10 @@ pub fn get_metadata<P: AsRef<Path>>(
     // With this optimization:         8 sec.
 
     use std::io;
+
     use winapi_util::Handle;
     fn handle_from_path_limited(path: &Path) -> io::Result<Handle> {
-        use std::fs::OpenOptions;
-        use std::os::windows::fs::OpenOptionsExt;
+        use std::{fs::OpenOptions, os::windows::fs::OpenOptionsExt};
         const FILE_READ_ATTRIBUTES: u32 = 0x0080;
 
         // So, it seems that it does does have to be that expensive to open
@@ -187,12 +188,12 @@ pub fn get_metadata<P: AsRef<Path>>(
             const FILE_ATTRIBUTE_SYSTEM: u32 = 0x04;
             const FILE_ATTRIBUTE_NORMAL: u32 = 0x80;
             const FILE_ATTRIBUTE_DIRECTORY: u32 = 0x10;
-            const FILE_ATTRIBUTE_SPARSE_FILE: u32 = 0x00000200;
-            const FILE_ATTRIBUTE_PINNED: u32 = 0x00080000;
-            const FILE_ATTRIBUTE_UNPINNED: u32 = 0x00100000;
-            const FILE_ATTRIBUTE_RECALL_ON_OPEN: u32 = 0x00040000;
-            const FILE_ATTRIBUTE_RECALL_ON_DATA_ACCESS: u32 = 0x00400000;
-            const FILE_ATTRIBUTE_OFFLINE: u32 = 0x00001000;
+            const FILE_ATTRIBUTE_SPARSE_FILE: u32 = 0x0000_0200;
+            const FILE_ATTRIBUTE_PINNED: u32 = 0x0008_0000;
+            const FILE_ATTRIBUTE_UNPINNED: u32 = 0x0010_0000;
+            const FILE_ATTRIBUTE_RECALL_ON_OPEN: u32 = 0x0004_0000;
+            const FILE_ATTRIBUTE_RECALL_ON_DATA_ACCESS: u32 = 0x0040_0000;
+            const FILE_ATTRIBUTE_OFFLINE: u32 = 0x0000_1000;
             // normally FILE_ATTRIBUTE_SPARSE_FILE would be enough, however Windows sometimes likes to mask it out. see: https://stackoverflow.com/q/54560454
             const IS_PROBABLY_ONEDRIVE: u32 = FILE_ATTRIBUTE_SPARSE_FILE
                 | FILE_ATTRIBUTE_PINNED
@@ -219,7 +220,7 @@ pub fn get_metadata<P: AsRef<Path>>(
             } else {
                 get_metadata_expensive(path, use_apparent_size)
             }
-        }
+        },
         _ => get_metadata_expensive(path, use_apparent_size),
     }
 }

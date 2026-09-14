@@ -1,30 +1,28 @@
-use std::cmp::Ordering;
-use std::fs;
-use std::io::Error;
-use std::sync::Arc;
-use std::sync::Mutex;
-use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
+use std::{
+    cmp::Ordering,
+    collections::HashSet,
+    fs,
+    fs::DirEntry,
+    io::Error,
+    path::{Path, PathBuf},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicUsize, Ordering as AtomicOrdering},
+    },
+};
 
-use crate::node::Node;
-use crate::progress::ORDERING;
-use crate::progress::Operation;
-use crate::progress::PAtomicInfo;
-use crate::progress::RuntimeErrors;
-use crate::utils::is_filtered_out_due_to_file_time;
-use crate::utils::is_filtered_out_due_to_invert_regex;
-use crate::utils::is_filtered_out_due_to_regex;
 use rayon::iter::{IntoParallelIterator, ParallelIterator};
 use regex::Regex;
-use std::path::Path;
-use std::path::PathBuf;
 
-use std::collections::HashSet;
-
-use crate::node::build_node;
-use std::fs::DirEntry;
-
-use crate::node::FileTime;
-use crate::platform::get_metadata;
+use crate::{
+    node::{FileTime, Node, build_node},
+    platform::get_metadata,
+    progress::{ORDERING, Operation, PAtomicInfo, RuntimeErrors},
+    utils::{
+        is_filtered_out_due_to_file_time, is_filtered_out_due_to_invert_regex,
+        is_filtered_out_due_to_regex,
+    },
+};
 
 #[derive(Debug)]
 pub enum Operator {
@@ -33,6 +31,8 @@ pub enum Operator {
     GreaterThan = 2,
 }
 
+// Walk options are boolean mode switches set once from the CLI
+#[allow(clippy::struct_excessive_bools)]
 pub struct WalkData<'a> {
     pub ignore_directories: HashSet<PathBuf>,
     pub filter_regex: &'a [Regex],
@@ -75,9 +75,7 @@ pub fn walk_it(dirs: HashSet<PathBuf>, walk_data: &WalkData) -> Vec<Node> {
         walk_data.progress_data.clear_state(&d);
 
         let root_is_symlink = walk_data.follow_links
-            && fs::symlink_metadata(&d)
-                .map(|m| m.file_type().is_symlink())
-                .unwrap_or(false);
+            && fs::symlink_metadata(&d).is_ok_and(|m| m.file_type().is_symlink());
 
         // Synthetic outer parent above the root. Lets `finalize_chain` build
         // the root's Node via the same code path as every other directory: it
@@ -143,7 +141,8 @@ fn clean_inodes(x: Node, inodes: &mut HashSet<(u64, u64)>, walk_data: &WalkData)
         .collect();
 
     let actual_size = if walk_data.by_filetime.is_some() {
-        // If by_filetime is Some, directory 'size' is the maximum filetime among child files instead of disk size
+        // If by_filetime is Some, directory 'size' is the maximum filetime among child files
+        // instead of disk size
         new_children
             .iter()
             .map(|c| c.size)
@@ -151,7 +150,8 @@ fn clean_inodes(x: Node, inodes: &mut HashSet<(u64, u64)>, walk_data: &WalkData)
             .max()
             .unwrap_or(0)
     } else {
-        // If by_filetime is None, directory 'size' is the sum of disk sizes or file counts of child files
+        // If by_filetime is None, directory 'size' is the sum of disk sizes or file counts of child
+        // files
         x.size + new_children.iter().map(|c| c.size).sum::<u64>()
     };
 
@@ -164,7 +164,7 @@ fn clean_inodes(x: Node, inodes: &mut HashSet<(u64, u64)>, walk_data: &WalkData)
     })
 }
 
-fn sort_by_inode(a: &Node, b: &Node) -> std::cmp::Ordering {
+fn sort_by_inode(a: &Node, b: &Node) -> Ordering {
     // Sorting by inode is quicker than by sorting by name/size
     match (a.inode_device, b.inode_device) {
         (Some(x), Some(y)) => {
@@ -175,7 +175,7 @@ fn sort_by_inode(a: &Node, b: &Node) -> std::cmp::Ordering {
             } else {
                 a.name.cmp(&b.name)
             }
-        }
+        },
         (Some(_), None) => Ordering::Greater,
         (None, Some(_)) => Ordering::Less,
         (None, None) => a.name.cmp(&b.name),
@@ -190,11 +190,11 @@ fn is_ignored_path(path: &Path, walk_data: &WalkData) -> bool {
 
     // Entry is inside an ignored absolute path
     // Absolute paths should be canonicalized before being added to `WalkData.ignore_directories`
-    for ignored_path in walk_data.ignore_directories.iter() {
+    for ignored_path in &walk_data.ignore_directories {
         if !ignored_path.is_absolute() {
             continue;
         }
-        let absolute_entry_path = std::fs::canonicalize(path).unwrap_or_default();
+        let absolute_entry_path = fs::canonicalize(path).unwrap_or_default();
         if absolute_entry_path.starts_with(ignored_path) {
             return true;
         }
@@ -233,14 +233,15 @@ fn ignore_file(entry: &DirEntry, walk_data: &WalkData) -> bool {
             ]
             .iter()
             .any(|(filter_time, actual_time)| {
-                is_filtered_out_due_to_file_time(filter_time, *actual_time)
+                is_filtered_out_due_to_file_time(filter_time.as_ref(), *actual_time)
             })
         {
             return true;
         }
     }
 
-    // Keeping `walk_data.filter_regex.is_empty()` is important for performance reasons, it stops unnecessary work
+    // Keeping `walk_data.filter_regex.is_empty()` is important for performance reasons, it stops
+    // unnecessary work
     if !walk_data.filter_regex.is_empty()
         && entry.path().is_file()
         && is_filtered_out_due_to_regex(walk_data.filter_regex, &entry.path())
@@ -275,7 +276,7 @@ fn walk_dir<'scope>(
                         continue;
                     }
                     break;
-                }
+                },
             };
 
             // Drain into a Vec before doing anything observable on `pending`.
@@ -322,7 +323,7 @@ fn walk_dir<'scope>(
                     Err(failed) => {
                         record_error(&failed, &pending.dir, walk_data);
                         None
-                    }
+                    },
                 })
                 .collect();
 
@@ -403,11 +404,11 @@ fn process_entry<'scope>(
 // per directory (push from child, decrement, take children) into one.
 //
 // Termination paths:
-//   1. pending stays > 0 after decrement: not the last completer. Return
-//      with the prior level's Node already pushed into our children.
-//   2. pending hits 0 and parent is None: this is the synthetic outer
-//      created in `walk_it`. Its `children` now holds the finished root
-//      Node; `walk_it` drains it after `rayon::scope` returns.
+//   1. pending stays > 0 after decrement: not the last completer. Return with the prior level's
+//      Node already pushed into our children.
+//   2. pending hits 0 and parent is None: this is the synthetic outer created in `walk_it`. Its
+//      `children` now holds the finished root Node; `walk_it` drains it after `rayon::scope`
+//      returns.
 fn finalize_chain(mut pending: Arc<PendingDir>, walk_data: &WalkData) {
     let mut node_to_push: Option<Node> = None;
     loop {
@@ -460,24 +461,25 @@ fn record_error(failed: &Error, dir: &Path, walk_data: &WalkData) {
             editable_error
                 .no_permissions
                 .insert(dir.to_string_lossy().into());
-        }
+        },
         std::io::ErrorKind::NotFound => {
             editable_error.file_not_found.insert(failed.to_string());
-        }
+        },
         std::io::ErrorKind::Interrupted => {
             editable_error.interrupted_error += 1;
-            // This does happen on some systems. It was set to 3 but sometimes zdu runs would exceed this
-            // However, if there is no limit this results in infinite retrys and zdu never finishes
+            // This does happen on some systems. It was set to 3 but sometimes zdu runs would exceed
+            // this However, if there is no limit this results in infinite retrys and
+            // zdu never finishes
             if editable_error.interrupted_error > 999 {
                 eprintln!(
                     "Too many Interrupted Errors occurred while scanning filesystem, skipping: {}",
                     dir.to_string_lossy()
                 );
             }
-        }
+        },
         _ => {
             editable_error.unknown_error.insert(failed.to_string());
-        }
+        },
     }
 }
 
@@ -627,7 +629,7 @@ mod tests {
         let mut path = tmp.path().to_path_buf();
         for _ in 0..DEPTH {
             path.push("a");
-            std::fs::create_dir(&path).unwrap();
+            fs::create_dir(&path).unwrap();
         }
 
         let walkdata = create_walker(true);
@@ -650,7 +652,7 @@ mod tests {
         const N: usize = 500;
         let tmp = tempfile::tempdir().unwrap();
         for i in 0..N {
-            let mut f = std::fs::File::create(tmp.path().join(format!("f{i}"))).unwrap();
+            let mut f = fs::File::create(tmp.path().join(format!("f{i}"))).unwrap();
             writeln!(f, "{i}").unwrap();
         }
 

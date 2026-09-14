@@ -1,14 +1,15 @@
+use std::{
+    ffi::OsStr,
+    fs::{FileTimes, OpenOptions},
+    str,
+};
+
 use assert_cmd::cargo_bin_cmd;
 use chrono::{Local, TimeZone};
-use std::ffi::OsStr;
-use std::fs::{FileTimes, OpenOptions};
-use std::str;
 
-/**
- * This file contains tests that test a substring of the output using '.contains'
- *
- * These tests should be the same cross platform
- */
+// This file contains tests that test a substring of the output using '.contains'
+//
+// These tests should be the same cross platform
 
 fn build_command<T: AsRef<OsStr>>(command_args: Vec<T>) -> String {
     let mut cmd = cargo_bin_cmd!("zdu");
@@ -185,9 +186,9 @@ pub fn test_files_from_flag_stdin() {
     let input = b"tests/test_dir_files_from/a_file\ntests/test_dir_files_from/hello_file\n";
     cmd.write_stdin(input.as_ref());
     let finished = &cmd.unwrap();
-    let stderr = std::str::from_utf8(&finished.stderr).unwrap();
+    let stderr = str::from_utf8(&finished.stderr).unwrap();
     assert_eq!(stderr, "");
-    let output = std::str::from_utf8(&finished.stdout).unwrap();
+    let output = str::from_utf8(&finished.stdout).unwrap();
     assert!(output.contains("a_file"));
     assert!(output.contains("hello_file"));
 }
@@ -228,9 +229,9 @@ pub fn test_files0_from_flag_stdin() {
     let input = b"tests/test_dir_files_from/a_file\0tests/test_dir_files_from/hello_file\0";
     cmd.write_stdin(input.as_ref());
     let finished = &cmd.unwrap();
-    let stderr = std::str::from_utf8(&finished.stderr).unwrap();
+    let stderr = str::from_utf8(&finished.stderr).unwrap();
     assert_eq!(stderr, "");
-    let output = std::str::from_utf8(&finished.stdout).unwrap();
+    let output = str::from_utf8(&finished.stdout).unwrap();
     assert!(output.contains("a_file"));
     assert!(output.contains("hello_file"));
 }
@@ -302,7 +303,7 @@ pub fn test_output_skip_total() {
 #[test]
 pub fn test_output_screen_reader() {
     let output = build_command(vec!["--screen-reader", "-c", "tests/test_dir/"]);
-    println!("{}", output);
+    println!("{output}");
     assert!(output.contains("test_dir   0"));
     assert!(output.contains("many       1"));
     assert!(output.contains("hello_file 2"));
@@ -414,8 +415,10 @@ pub fn test_collapse() {
 pub fn test_show_files_by_type_with_filetime() {
     // When grouping by file type and showing file times, the 'size' of a group is
     // a timestamp: it must be the newest file's time, not the sum of the times.
-    use std::fs::File;
-    use std::time::{Duration, UNIX_EPOCH};
+    use std::{
+        fs::File,
+        time::{Duration, UNIX_EPOCH},
+    };
 
     let dir = tempfile::Builder::new().tempdir().unwrap();
 

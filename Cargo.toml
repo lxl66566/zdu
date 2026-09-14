@@ -8,7 +8,7 @@ readme       = "README.md"
 homepage     = "https://github.com/lxl66566/zdu"
 repository   = "https://github.com/lxl66566/zdu"
 license      = "MIT OR Apache-2.0"
-keywords     = ["du", "command-line", "disk", "disk-usage"]
+keywords     = ["command-line", "disk", "disk-usage", "du"]
 categories   = ["command-line-utilities"]
 include      = [
   "/CHANGELOG.md",
@@ -24,33 +24,25 @@ include      = [
 name = "zdu"
 path = "src/main.rs"
 
-[profile.release]
-codegen-units = 1
-lto           = true
-strip         = true
+[[test]]
+name = "integration"
+path = "tests/tests.rs"
 
 [dependencies]
+chrono        = "0.4"
 clap          = { version = "4", features = ["derive"] }
+config-file   = "0.2"
+ctrlc         = "3"
 lscolors      = "0.21"
 nu-ansi-term  = "0.50"
-terminal_size = "0.4"
-unicode-width = "0.2"
 rayon         = "1"
-thousands     = "0.2"
-stfu8         = "0.2"
 regex         = "1"
-config-file   = "0.2"
 serde         = { version = "1.0", features = ["derive"] }
 serde_json    = "1.0"
-ctrlc         = "3"
-chrono        = "0.4"
-
-[target.'cfg(not(target_has_atomic = "64"))'.dependencies]
-portable-atomic = "1.4"
-
-[target.'cfg(windows)'.dependencies]
-winapi-util = "0.1"
-filesize    = "0.2.0"
+stfu8         = "0.2"
+terminal_size = "0.4"
+thousands     = "0.2"
+unicode-width = "0.2"
 
 [dev-dependencies]
 assert_cmd = "2"
@@ -61,9 +53,17 @@ clap          = { version = "4.4", features = ["derive"] }
 clap_complete = "4.4"
 clap_mangen   = "0.3"
 
-[[test]]
-name = "integration"
-path = "tests/tests.rs"
+[target.'cfg(not(target_has_atomic = "64"))'.dependencies]
+portable-atomic = "1.4"
+
+[target."cfg(windows)".dependencies]
+filesize    = "0.2.0"
+winapi-util = "0.1"
+
+[lints.cargo]
+# keep explicit readme/homepage for crates.io metadata clarity
+manual_readme      = "allow"
+redundant_homepage = "allow"
 
 [lints.clippy]
 all                     = { level = "warn", priority = -1 }
@@ -78,3 +78,8 @@ wildcard_imports        = "allow"
 [lints.rust]
 unsafe_code           = "allow"
 unused_qualifications = "warn"
+
+[profile.release]
+strip         = true
+lto           = true
+codegen-units = 1

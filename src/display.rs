@@ -1,26 +1,34 @@
-use crate::display_node::DisplayNode;
-use crate::node::FileTime;
+// Bar and size math narrows u64/usize to f32/i32/u32 for display purposes;
+// precision loss and truncation are acceptable (display-only approximations).
+#![allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_possible_wrap,
+    clippy::cast_precision_loss
+)]
 
-use lscolors::{LsColors, Style};
-use nu_ansi_term::Color::{DarkGray, Red};
-
-use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
-
-use stfu8::encode_u8;
+use std::{
+    cmp::{max, min},
+    fs,
+    iter::repeat_n,
+    path::Path,
+};
 
 use chrono::{DateTime, Local, TimeZone, Utc};
-use std::cmp::max;
-use std::cmp::min;
-use std::fs;
-use std::iter::repeat_n;
-use std::path::Path;
+use lscolors::{LsColors, Style};
+use nu_ansi_term::Color::{DarkGray, Red};
+use stfu8::encode_u8;
 use thousands::Separable;
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
+
+use crate::{display_node::DisplayNode, node::FileTime};
 
 pub static SI_UNITS: [&str; 5] = ["P", "T", "G", "M", "K"];
 pub static IEC_UNITS: [&str; 5] = ["Pi", "Ti", "Gi", "Mi", "Ki"];
 static BLOCKS: [char; 5] = ['█', '▓', '▒', '░', ' '];
 const FILETIME_SHOW_LENGTH: usize = 19;
 
+// Display options are boolean rendering switches by nature
+#[allow(clippy::struct_excessive_bools)]
 pub struct InitialDisplayData {
     pub short_paths: bool,
     pub is_reversed: bool,
@@ -47,11 +55,10 @@ impl DisplayData {
             (true, true, true) => "┌─┴",
             (true, true, false) => "┌──",
             (true, false, true) => "├─┴",
-            (true, false, false) => "├──",
             (false, true, true) => "└─┬",
             (false, true, false) => "└──",
             (false, false, true) => "├─┬",
-            (false, false, false) => "├──",
+            (false | true, false, false) => "├──",
         }
     }
 
@@ -73,7 +80,11 @@ impl DisplayData {
 
     fn percent_size(&self, node: &DisplayNode) -> f32 {
         let result = node.size as f32 / self.base_size as f32;
-        if result.is_normal() { result } else { 0.0 }
+        if result.is_normal() {
+            result
+        } else {
+            0.0
+        }
     }
 }
 
@@ -86,7 +97,7 @@ struct DrawData<'a> {
 impl DrawData<'_> {
     fn get_new_indent(&self, has_children: bool, was_i_last: bool) -> String {
         let chars = self.display_data.get_tree_chars(was_i_last, has_children);
-        self.indent.to_string() + chars
+        self.indent.clone() + chars
     }
 
     // TODO: can we test this?
@@ -98,7 +109,7 @@ impl DrawData<'_> {
         let num_bars = chars_in_bar as f32 * self.display_data.percent_size(node);
         let mut num_not_my_bar = (chars_in_bar as i32) - num_bars as i32;
 
-        let mut new_bar = "".to_string();
+        let mut new_bar = String::new();
         let idx = 5 - level.clamp(1, 4);
 
         let itr: Box<dyn Iterator<Item = char>> = if self.display_data.initial.bars_on_right {
@@ -167,14 +178,12 @@ pub fn draw_it(
         ls_colors: LsColors::from_env().unwrap_or_default(),
     };
     let draw_data = DrawData {
-        indent: "".to_string(),
+        indent: String::new(),
         percent_bar: first_size_bar,
         display_data: &display_data,
     };
 
-    if !skip_total {
-        display_node(root_node, &draw_data, true, true);
-    } else {
+    if skip_total {
         for (count, c) in root_node
             .get_children_from_node(draw_data.display_data.initial.is_reversed)
             .enumerate()
@@ -183,6 +192,8 @@ pub fn draw_it(
             let was_i_last = display_data.is_last(count, root_node.num_siblings());
             display_node(c, &draw_data, is_biggest, was_i_last);
         }
+    } else {
+        display_node(root_node, &draw_data, true, true);
     }
 }
 
@@ -190,7 +201,7 @@ fn find_biggest_size_str(node: &DisplayNode, output_format: &str) -> usize {
     let mut mx = human_readable_number(node.size, output_format)
         .chars()
         .count();
-    for n in node.children.iter() {
+    for n in &node.children {
         mx = max(mx, find_biggest_size_str(n, output_format));
     }
     mx
@@ -229,7 +240,7 @@ fn display_node(node: &DisplayNode, draw_data: &DrawData, is_biggest: bool, is_l
     let to_print = format_string(node, &indent, &bar_text, is_biggest, draw_data.display_data);
 
     if !draw_data.display_data.initial.is_reversed {
-        println!("{to_print}")
+        println!("{to_print}");
     }
 
     let dd = DrawData {
@@ -250,7 +261,7 @@ fn display_node(node: &DisplayNode, draw_data: &DrawData, is_biggest: bool, is_l
     }
 
     if draw_data.display_data.initial.is_reversed {
-        println!("{to_print}")
+        println!("{to_print}");
     }
 }
 
@@ -362,7 +373,7 @@ fn get_name_percent(
     if display_data.initial.is_screen_reader {
         let percent = display_data.percent_size(node) * 100.0;
         let percent_size_str = format!("{percent:.0}%");
-        let percents = format!(" {percent_size_str:>4}",);
+        let percents = format!(" {percent_size_str:>4}");
         let name = pad_or_trim_filename(node, "", display_data);
         (percents, name)
     // Bar chart being empty may come from either config or the screen not being wide enough
@@ -380,7 +391,7 @@ fn get_name_percent(
     } else {
         let n = get_printable_name(&node.name, display_data.initial.short_paths);
         let name = maybe_trim_filename(n, indent, display_data);
-        ("".into(), name)
+        (String::new(), name)
     }
 }
 
@@ -469,34 +480,31 @@ pub fn get_number_format(output_str: &str) -> Option<(u64, &'static str)> {
 pub fn human_readable_number(size: u64, output_str: &str) -> String {
     if output_str == "count" {
         return size.to_string();
-    };
-    match get_number_format(output_str) {
-        Some((x, u)) => {
-            format!("{}{}", (size / x), u)
-        }
-        None => {
-            let units = get_units(output_str);
-            let thousand = get_type_of_thousand(output_str);
-            for (i, u) in units.iter().enumerate() {
-                let marker = thousand.pow((units.len() - i) as u32);
-                if size >= marker {
-                    if size / marker < 10 {
-                        return format!("{:.1}{}", (size as f32 / marker as f32), u);
-                    } else {
-                        return format!("{}{}", (size / marker), u);
-                    }
+    }
+    if let Some((x, u)) = get_number_format(output_str) {
+        format!("{}{}", (size / x), u)
+    } else {
+        let units = get_units(output_str);
+        let thousand = get_type_of_thousand(output_str);
+        for (i, u) in units.iter().enumerate() {
+            let marker = thousand.pow((units.len() - i) as u32);
+            if size >= marker {
+                if size / marker < 10 {
+                    return format!("{:.1}{}", (size as f32 / marker as f32), u);
                 }
+                return format!("{}{}", (size / marker), u);
             }
-            format!("{size}B")
         }
+        format!("{size}B")
     }
 }
 
 mod tests {
     #[allow(unused_imports)]
-    use super::*;
-    #[allow(unused_imports)]
     use std::path::PathBuf;
+
+    #[allow(unused_imports)]
+    use super::*;
 
     #[cfg(test)]
     fn get_fake_display_data(longest_string_length: usize) -> DisplayData {
@@ -508,7 +516,7 @@ mod tests {
             by_filecount: false,
             by_filetime: None,
             is_screen_reader: false,
-            output_format: "".into(),
+            output_format: String::new(),
             bars_on_right: false,
         };
         DisplayData {
@@ -659,7 +667,7 @@ mod tests {
         };
         let first_size_bar = repeat_n(BLOCKS[0], 13).collect();
         let dd = DrawData {
-            indent: "".into(),
+            indent: String::new(),
             percent_bar: first_size_bar,
             display_data: disp,
         };
@@ -691,7 +699,7 @@ mod tests {
         disp.initial.bars_on_right = true;
         let (dd, n) = build_draw_data(&disp, 11);
         let bar = dd.generate_bar(&n, 3);
-        assert_eq!(bar, "▒▒▒▒▒▒███████")
+        assert_eq!(bar, "▒▒▒▒▒▒███████");
     }
     #[test]
     fn test_draw_data4() {

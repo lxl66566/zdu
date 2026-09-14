@@ -1,9 +1,8 @@
+use std::{fs::File, io::Error, path::Path};
+
 use clap::CommandFactory;
 use clap_complete::{generate_to, shells::*};
 use clap_mangen::Man;
-use std::fs::File;
-use std::io::Error;
-use std::path::Path;
 
 include!("src/cli.rs");
 

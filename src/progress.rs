@@ -1,3 +1,5 @@
+#[cfg(target_has_atomic = "64")]
+use std::sync::atomic::AtomicU64;
 use std::{
     collections::HashSet,
     io::Write,
@@ -13,12 +15,10 @@ use std::{
 
 #[cfg(not(target_has_atomic = "64"))]
 use portable_atomic::AtomicU64;
-#[cfg(target_has_atomic = "64")]
-use std::sync::atomic::AtomicU64;
 
 use crate::display::human_readable_number;
 
-/* -------------------------------------------------------------------------- */
+// --------------------------------------------------------------------------
 
 pub const ORDERING: Ordering = Ordering::Relaxed;
 
@@ -46,7 +46,7 @@ impl ThreadSyncTrait<String> for ThreadStringWrapper {
     }
 }
 
-/* -------------------------------------------------------------------------- */
+// --------------------------------------------------------------------------
 
 // creating an enum this way allows to have simpler syntax compared to a Mutex or a RwLock
 #[allow(non_snake_case)]
@@ -81,7 +81,7 @@ pub struct RuntimeErrors {
     pub interrupted_error: i32,
 }
 
-/* -------------------------------------------------------------------------- */
+// --------------------------------------------------------------------------
 
 fn format_preparing_str(prog_char: char, data: &PAtomicInfo, output_display: &str) -> String {
     let path_in = data.current_path.get();
@@ -119,7 +119,7 @@ impl PIndicator {
         let time_info_thread = std::thread::spawn(move || {
             let mut progress_char_i: usize = 0;
             let mut stderr = std::io::stderr();
-            let mut msg = "".to_string();
+            let mut msg = String::new();
 
             // While the timeout triggers we go round the loop
             // If we disconnect or the sender sends its message we exit the while loop
@@ -149,7 +149,7 @@ impl PIndicator {
             write!(stderr, "\r").unwrap();
             stderr.flush().unwrap();
         });
-        self.thread = Some((stop_handler, time_info_thread))
+        self.thread = Some((stop_handler, time_info_thread));
     }
 
     pub fn stop(self) {

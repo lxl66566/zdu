@@ -1,15 +1,18 @@
+use std::{
+    collections::{BinaryHeap, HashMap, HashSet},
+    path::{Path, PathBuf},
+};
+
 use stfu8::encode_u8;
 
-use crate::display::get_printable_name;
-use crate::display_node::DisplayNode;
-use crate::node::FileTime;
-use crate::node::Node;
-use std::collections::BinaryHeap;
-use std::collections::HashMap;
-use std::collections::HashSet;
-use std::path::Path;
-use std::path::PathBuf;
+use crate::{
+    display::get_printable_name,
+    display_node::DisplayNode,
+    node::{FileTime, Node},
+};
 
+// Aggregation options are boolean display switches by nature
+#[allow(clippy::struct_excessive_bools)]
 pub struct AggregateData {
     pub min_size: Option<usize>,
     pub only_dir: bool,
@@ -22,16 +25,16 @@ pub struct AggregateData {
 
 pub fn get_biggest(
     top_level_nodes: Vec<Node>,
-    display_data: AggregateData,
-    by_filetime: &Option<FileTime>,
-    keep_collapsed: HashSet<PathBuf>,
+    display_data: &AggregateData,
+    by_filetime: Option<&FileTime>,
+    keep_collapsed: &HashSet<PathBuf>,
 ) -> DisplayNode {
     let mut heap = BinaryHeap::new();
     let number_top_level_nodes = top_level_nodes.len();
     let root;
 
     if number_top_level_nodes == 0 {
-        root = total_node_builder(0, vec![])
+        root = total_node_builder(0, vec![]);
     } else if number_top_level_nodes > 1 {
         let size = if by_filetime.is_some() {
             top_level_nodes
@@ -45,10 +48,10 @@ pub fn get_biggest(
 
         let nodes = handle_duplicate_top_level_names(top_level_nodes, display_data.short_paths);
         root = total_node_builder(size, nodes);
-        heap = always_add_children(&display_data, &root, heap);
+        heap = always_add_children(display_data, &root, heap);
     } else {
         root = top_level_nodes.into_iter().next().unwrap();
-        heap = add_children(&display_data, &root, heap);
+        heap = add_children(display_data, &root, heap);
     }
 
     fill_remaining_lines(heap, &root, display_data, keep_collapsed)
@@ -67,8 +70,8 @@ fn total_node_builder(size: u64, children: Vec<Node>) -> Node {
 pub fn fill_remaining_lines<'a>(
     mut heap: BinaryHeap<&'a Node>,
     root: &'a Node,
-    display_data: AggregateData,
-    keep_collapsed: HashSet<PathBuf>,
+    display_data: &AggregateData,
+    keep_collapsed: &HashSet<PathBuf>,
 ) -> DisplayNode {
     let mut allowed_nodes = HashMap::new();
 
@@ -82,9 +85,9 @@ pub fn fill_remaining_lines<'a>(
                     allowed_nodes.insert(line.name.as_path(), line);
                 }
                 if !keep_collapsed.contains(&line.name) {
-                    heap = add_children(&display_data, line, heap);
+                    heap = add_children(display_data, line, heap);
                 }
-            }
+            },
             None => break,
         }
     }
@@ -188,7 +191,7 @@ fn handle_duplicate_top_level_names(top_level_nodes: Vec<Node>, short_paths: boo
             dir_walk_up_count += 1;
             let mut newer = vec![];
 
-            for node in new_top_nodes.iter() {
+            for node in &new_top_nodes {
                 let mut folders = node.name.iter().rev();
                 // Get parent folder (if second time round get grandparent and so on)
                 for _ in 0..dir_walk_up_count {
@@ -206,8 +209,8 @@ fn handle_duplicate_top_level_names(top_level_nodes: Vec<Node>, short_paths: boo
                             inode_device: node.inode_device,
                             depth: node.depth,
                         };
-                        newer.push(n)
-                    }
+                        newer.push(n);
+                    },
                     // Node does not have a parent
                     None => newer.push(node.clone()),
                 }

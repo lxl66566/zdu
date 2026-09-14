@@ -1,14 +1,16 @@
-use assert_cmd::{Command, cargo_bin_cmd};
-use std::fs::File;
-use std::io::Write;
-use std::path::PathBuf;
-use std::str;
+use std::{
+    fs::File,
+    io::Write,
+    path::{Path, PathBuf},
+    str,
+};
 
-use tempfile::Builder;
-use tempfile::TempDir;
+use assert_cmd::{Command, cargo_bin_cmd};
+use tempfile::{Builder, TempDir};
 
 // File sizes differ on both platform and on the format of the disk.
-// Windows: `ln` is not usually an available command; creation of symbolic links requires special enhanced permissions
+// Windows: `ln` is not usually an available command; creation of symbolic links requires special
+// enhanced permissions
 
 fn build_temp_file(dir: &TempDir) -> PathBuf {
     let file_path = dir.path().join("notes.txt");
@@ -17,7 +19,7 @@ fn build_temp_file(dir: &TempDir) -> PathBuf {
     file_path
 }
 
-fn link_it(link_path: PathBuf, file_path_s: &str, is_soft: bool) -> String {
+fn link_it(link_path: &Path, file_path_s: &str, is_soft: bool) -> String {
     let link_name_s = link_path.to_str().unwrap();
     let mut c = Command::new("ln");
     if is_soft {
@@ -29,7 +31,10 @@ fn link_it(link_path: PathBuf, file_path_s: &str, is_soft: bool) -> String {
     link_name_s.into()
 }
 
-#[cfg_attr(target_os = "windows", ignore)]
+#[cfg_attr(
+    target_os = "windows",
+    ignore = "creating symlinks on windows requires elevated privileges"
+)]
 #[test]
 pub fn test_soft_sym_link() {
     let dir = Builder::new().tempdir().unwrap();
@@ -38,11 +43,11 @@ pub fn test_soft_sym_link() {
     let file_path_s = file.to_str().unwrap();
 
     let link_name = dir.path().join("the_link");
-    let link_name_s = link_it(link_name, file_path_s, true);
+    let link_name_s = link_it(&link_name, file_path_s, true);
 
-    let c = format!(" ├── {}", link_name_s);
-    let b = format!(" ┌── {}", file_path_s);
-    let a = format!("─┴ {}", dir_s);
+    let c = format!(" ├── {link_name_s}");
+    let b = format!(" ┌── {file_path_s}");
+    let a = format!("─┴ {dir_s}");
 
     let mut cmd = cargo_bin_cmd!("zdu");
     // Mac test runners create long filenames in tmp directories
@@ -58,7 +63,10 @@ pub fn test_soft_sym_link() {
     assert!(output.contains(c.as_str()));
 }
 
-#[cfg_attr(target_os = "windows", ignore)]
+#[cfg_attr(
+    target_os = "windows",
+    ignore = "creating symlinks on windows requires elevated privileges"
+)]
 #[test]
 pub fn test_hard_sym_link() {
     let dir = Builder::new().tempdir().unwrap();
@@ -67,10 +75,10 @@ pub fn test_hard_sym_link() {
     let file_path_s = file.to_str().unwrap();
 
     let link_name = dir.path().join("the_link");
-    link_it(link_name, file_path_s, false);
+    link_it(&link_name, file_path_s, false);
 
-    let file_output = format!(" ┌── {}", file_path_s);
-    let dirs_output = format!("─┴ {}", dir_s);
+    let file_output = format!(" ┌── {file_path_s}");
+    let dirs_output = format!("─┴ {dir_s}");
 
     let mut cmd = cargo_bin_cmd!("zdu");
     // Mac test runners create long filenames in tmp directories
@@ -83,7 +91,10 @@ pub fn test_hard_sym_link() {
     assert!(output.contains(file_output.as_str()));
 }
 
-#[cfg_attr(target_os = "windows", ignore)]
+#[cfg_attr(
+    target_os = "windows",
+    ignore = "creating symlinks on windows requires elevated privileges"
+)]
 #[test]
 pub fn test_hard_sym_link_no_dup_multi_arg() {
     let dir = Builder::new().tempdir().unwrap();
@@ -94,7 +105,7 @@ pub fn test_hard_sym_link_no_dup_multi_arg() {
     let file_path_s = file.to_str().unwrap();
 
     let link_name = dir_link.path().join("the_link");
-    let link_name_s = link_it(link_name, file_path_s, false);
+    let link_name_s = link_it(&link_name, file_path_s, false);
 
     let mut cmd = cargo_bin_cmd!("zdu");
 
@@ -111,17 +122,20 @@ pub fn test_hard_sym_link_no_dup_multi_arg() {
     assert!(has_file_only || has_link_only);
 }
 
-#[cfg_attr(target_os = "windows", ignore)]
+#[cfg_attr(
+    target_os = "windows",
+    ignore = "creating symlinks on windows requires elevated privileges"
+)]
 #[test]
 pub fn test_recursive_sym_link() {
     let dir = Builder::new().tempdir().unwrap();
     let dir_s = dir.path().to_str().unwrap();
 
     let link_name = dir.path().join("the_link");
-    let link_name_s = link_it(link_name, dir_s, true);
+    let link_name_s = link_it(&link_name, dir_s, true);
 
-    let a = format!("─┬ {}", dir_s);
-    let b = format!(" └── {}", link_name_s);
+    let a = format!("─┬ {dir_s}");
+    let b = format!(" └── {link_name_s}");
 
     let mut cmd = cargo_bin_cmd!("zdu");
     let output = cmd

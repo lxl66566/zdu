@@ -10,39 +10,33 @@ mod platform;
 mod progress;
 mod utils;
 
-use crate::cli::Cli;
-use crate::config::Config;
-use crate::display_node::DisplayNode;
-use crate::progress::RuntimeErrors;
+use std::{
+    cmp::max,
+    collections::HashSet,
+    env,
+    fs::{read, read_to_string},
+    io,
+    io::Read,
+    panic,
+    path::PathBuf,
+    process,
+    sync::{Arc, Mutex},
+};
+
 use clap::Parser;
-use dir_walker::WalkData;
+use config::get_config;
+use dir_walker::{WalkData, walk_it};
 use display::InitialDisplayData;
-use filter::AggregateData;
+use display_node::OUTPUT_TYPE;
+use filter::{AggregateData, get_biggest};
+use filter_type::get_all_file_types;
 use progress::PIndicator;
-use regex::Error;
-use std::collections::HashSet;
-use std::env;
-use std::fs::{read, read_to_string};
-use std::io;
-use std::io::Read;
-use std::panic;
-use std::process;
-use std::sync::Arc;
-use std::sync::Mutex;
-use utils::canonicalize_absolute_path;
+use regex::{Error, Regex};
+use terminal_size::{Height, Width, terminal_size};
+use utils::{canonicalize_absolute_path, get_filesystem_devices, simplify_dir_names};
 
 use self::display::draw_it;
-use config::get_config;
-use dir_walker::walk_it;
-use display_node::OUTPUT_TYPE;
-use filter::get_biggest;
-use filter_type::get_all_file_types;
-use regex::Regex;
-use std::cmp::max;
-use std::path::PathBuf;
-use terminal_size::{Height, Width, terminal_size};
-use utils::get_filesystem_devices;
-use utils::simplify_dir_names;
+use crate::{cli::Cli, config::Config, display_node::DisplayNode, progress::RuntimeErrors};
 
 static DEFAULT_NUMBER_OF_LINES: usize = 30;
 static DEFAULT_TERMINAL_WIDTH: usize = 80;
@@ -68,12 +62,11 @@ fn should_init_color(no_color: bool, force_color: bool) -> bool {
     {
         // Required for windows 10
         // Fails to resolve for windows 8 so disable color
-        match nu_ansi_term::enable_ansi_support() {
-            Ok(_) => true,
-            Err(_) => {
-                eprintln!("This version of Windows does not support ANSI colors");
-                false
-            }
+        if let Ok(()) = nu_ansi_term::enable_ansi_support() {
+            true
+        } else {
+            eprintln!("This version of Windows does not support ANSI colors");
+            false
         }
     }
     #[cfg(not(windows))]
@@ -85,19 +78,18 @@ fn should_init_color(no_color: bool, force_color: bool) -> bool {
 fn get_height_of_terminal() -> usize {
     terminal_size()
         // Windows CI runners detect a terminal height of 0
-        .map(|(_, Height(h))| max(h.into(), DEFAULT_NUMBER_OF_LINES))
-        .unwrap_or(DEFAULT_NUMBER_OF_LINES)
+        .map_or(DEFAULT_NUMBER_OF_LINES, |(_, Height(h))| max(h.into(), DEFAULT_NUMBER_OF_LINES))
         - 10
 }
 
 fn get_width_of_terminal() -> usize {
-    terminal_size()
-        .map(|(Width(w), _)| match cfg!(windows) {
-            // Windows CI runners detect a very low terminal width
-            true => max(w.into(), DEFAULT_TERMINAL_WIDTH),
-            false => w.into(),
-        })
-        .unwrap_or(DEFAULT_TERMINAL_WIDTH)
+    terminal_size().map_or(DEFAULT_TERMINAL_WIDTH, |(Width(w), _)| {
+        if cfg!(windows) {
+            max(w.into(), DEFAULT_TERMINAL_WIDTH)
+        } else {
+            w.into()
+        }
+    })
 }
 
 fn get_regex_value(maybe_value: Option<&Vec<String>>) -> Vec<Regex> {
@@ -165,7 +157,7 @@ fn main() {
             } else {
                 get_height_of_terminal()
             }
-        }
+        },
     };
 
     let is_colors = should_init_color(
@@ -192,7 +184,7 @@ fn main() {
     };
     let ignore_from_file = ignore_from_file_result
         .into_iter()
-        .filter_map(|x| x.ok())
+        .filter_map(Result::ok)
         .collect::<Vec<Regex>>();
 
     let invert_filter_regexs = invert_filter_regexs
@@ -201,14 +193,14 @@ fn main() {
         .collect::<Vec<Regex>>();
 
     let by_filecount = options.filecount;
-    let by_filetime = config.get_filetime(&options);
+    let by_filetime = Config::get_filetime(&options);
     let limit_filesystem = config.get_limit_filesystem(&options);
     let follow_links = options.dereference_links;
 
     let allowed_filesystems = if limit_filesystem {
         get_filesystem_devices(&target_dirs, follow_links)
     } else {
-        Default::default()
+        HashSet::default()
     };
 
     let simplified_dirs = simplify_dir_names(&target_dirs);
@@ -224,25 +216,25 @@ fn main() {
 
     let mut indicator = PIndicator::build_me();
     if !config.get_disable_progress(&options) {
-        indicator.spawn(output_format.clone())
+        indicator.spawn(output_format.clone());
     }
 
     let keep_collapsed: HashSet<PathBuf> = match config.get_collapse(&options) {
         Some(ref collapse) => {
             let mut combined_dirs = HashSet::new();
             for collapse_dir in collapse {
-                for target_dir in target_dirs.iter() {
+                for target_dir in &target_dirs {
                     combined_dirs.insert(PathBuf::from(target_dir).join(collapse_dir));
                 }
             }
             combined_dirs
-        }
+        },
         None => HashSet::new(),
     };
 
-    let filter_modified_time = config.get_modified_time_operator(&options);
-    let filter_accessed_time = config.get_accessed_time_operator(&options);
-    let filter_changed_time = config.get_changed_time_operator(&options);
+    let filter_modified_time = Config::get_modified_time_operator(&options);
+    let filter_accessed_time = Config::get_accessed_time_operator(&options);
+    let filter_changed_time = Config::get_changed_time_operator(&options);
 
     let walk_data = WalkData {
         ignore_directories: ignored_full_path,
@@ -265,33 +257,36 @@ fn main() {
 
     if options.stack_size.is_some() {
         eprintln!(
-            "warning: --stack-size/-S is deprecated and ignored; \
-             the walker no longer recurses, so a custom stack is unnecessary."
+            "warning: --stack-size/-S is deprecated and ignored; the walker no longer recurses, \
+             so a custom stack is unnecessary."
         );
     }
 
-    init_rayon(&threads_to_use).install(|| {
+    init_rayon(threads_to_use.as_ref()).install(|| {
         let top_level_nodes = walk_it(simplified_dirs, &walk_data);
 
-        let tree = match summarize_file_types {
-            true => get_all_file_types(&top_level_nodes, number_of_lines, walk_data.by_filetime),
-            false => {
-                let agg_data = AggregateData {
-                    min_size: config.get_min_size(&options),
-                    only_dir: config.get_only_dir(&options),
-                    only_file: config.get_only_file(&options),
-                    number_of_lines,
-                    depth,
-                    using_a_filter: !filter_regexs.is_empty() || !invert_filter_regexs.is_empty(),
-                    short_paths: !config.get_full_paths(&options),
-                };
-                get_biggest(
-                    top_level_nodes,
-                    agg_data,
-                    walk_data.by_filetime,
-                    keep_collapsed,
-                )
-            }
+        let tree = if summarize_file_types {
+            get_all_file_types(
+                &top_level_nodes,
+                number_of_lines,
+                walk_data.by_filetime.as_ref(),
+            )
+        } else {
+            let agg_data = AggregateData {
+                min_size: config.get_min_size(&options),
+                only_dir: config.get_only_dir(&options),
+                only_file: config.get_only_file(&options),
+                number_of_lines,
+                depth,
+                using_a_filter: !filter_regexs.is_empty() || !invert_filter_regexs.is_empty(),
+                short_paths: !config.get_full_paths(&options),
+            };
+            get_biggest(
+                top_level_nodes,
+                &agg_data,
+                walk_data.by_filetime.as_ref(),
+                &keep_collapsed,
+            )
         };
 
         // Must have stopped indicator before we print to stderr
@@ -302,31 +297,30 @@ fn main() {
         print_any_errors(print_errors, &final_errors);
 
         if tree.children.is_empty() && !final_errors.file_not_found.is_empty() {
-            std::process::exit(1)
-        } else {
-            print_output(
-                config,
-                options,
-                tree,
-                walk_data.by_filecount,
-                is_colors,
-                terminal_width,
-            )
+            process::exit(1)
         }
+        print_output(
+            &config,
+            &options,
+            &tree,
+            walk_data.by_filecount,
+            is_colors,
+            terminal_width,
+        );
     });
 }
 
 fn print_output(
-    config: Config,
-    options: Cli,
-    tree: DisplayNode,
+    config: &Config,
+    options: &Cli,
+    tree: &DisplayNode,
     by_filecount: bool,
     is_colors: bool,
     terminal_width: usize,
 ) {
-    let output_format = config.get_output_format(&options);
+    let output_format = config.get_output_format(options);
 
-    if config.get_output_json(&options) {
+    if config.get_output_json(options) {
         OUTPUT_TYPE.with(|wrapped| {
             if by_filecount {
                 wrapped.replace("count".to_string());
@@ -337,24 +331,24 @@ fn print_output(
         println!("{}", serde_json::to_string(&tree).unwrap());
     } else {
         let idd = InitialDisplayData {
-            short_paths: !config.get_full_paths(&options),
-            is_reversed: !config.get_reverse(&options),
+            short_paths: !config.get_full_paths(options),
+            is_reversed: !config.get_reverse(options),
             colors_on: is_colors,
-            dim: config.get_dim(&options),
+            dim: config.get_dim(options),
             by_filecount,
-            by_filetime: config.get_filetime(&options),
-            is_screen_reader: config.get_screen_reader(&options),
+            by_filetime: Config::get_filetime(options),
+            is_screen_reader: config.get_screen_reader(options),
             output_format,
-            bars_on_right: config.get_bars_on_right(&options),
+            bars_on_right: config.get_bars_on_right(options),
         };
 
         draw_it(
             idd,
-            &tree,
-            config.get_no_bars(&options),
+            tree,
+            config.get_no_bars(options),
             terminal_width,
-            config.get_skip_total(&options),
-        )
+            config.get_skip_total(options),
+        );
     }
 }
 
@@ -363,7 +357,7 @@ fn print_any_errors(print_errors: bool, final_errors: &RuntimeErrors) {
         let err = final_errors
             .file_not_found
             .iter()
-            .map(|a| a.as_ref())
+            .map(AsRef::as_ref)
             .collect::<Vec<&str>>()
             .join(", ");
         eprintln!("No such file or directory: {err}");
@@ -373,7 +367,7 @@ fn print_any_errors(print_errors: bool, final_errors: &RuntimeErrors) {
             let err = final_errors
                 .no_permissions
                 .iter()
-                .map(|a| a.as_ref())
+                .map(AsRef::as_ref)
                 .collect::<Vec<&str>>()
                 .join(", ");
             eprintln!("Did not have permissions for directories: {err}");
@@ -387,7 +381,7 @@ fn print_any_errors(print_errors: bool, final_errors: &RuntimeErrors) {
         let err = final_errors
             .unknown_error
             .iter()
-            .map(|a| a.as_ref())
+            .map(AsRef::as_ref)
             .collect::<Vec<&str>>()
             .join(", ");
         eprintln!("Unknown Error: {err}");
@@ -433,15 +427,15 @@ fn read_paths_from_source(path: &str, null_terminated: bool) -> Vec<String> {
         Err(None) => {
             eprintln!("No files provided, defaulting to current directory");
             vec![".".to_owned()]
-        }
+        },
         Err(Some(msg)) => {
             eprintln!("Failed to read file: {msg}");
             vec![".".to_owned()]
-        }
+        },
     }
 }
 
-fn init_rayon(threads: &Option<usize>) -> rayon::ThreadPool {
+fn init_rayon(threads: Option<&usize>) -> rayon::ThreadPool {
     let mut builder = rayon::ThreadPoolBuilder::new();
     if let Some(t) = threads {
         builder = builder.num_threads(*t);

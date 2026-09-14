@@ -1,8 +1,6 @@
-use std::cell::RefCell;
-use std::path::PathBuf;
+use std::{cell::RefCell, path::PathBuf};
 
-use serde::ser::SerializeStruct;
-use serde::{Serialize, Serializer};
+use serde::{Serialize, Serializer, ser::SerializeStruct};
 
 use crate::display::human_readable_number;
 
@@ -36,12 +34,10 @@ thread_local! {
     pub static OUTPUT_TYPE: RefCell<String> = const { RefCell::new(String::new()) };
 }
 
-/*
-We need the custom Serialize incase someone uses the -o flag to pass a custom output type in
-(show size in Mb / Gb etc).
-Sadly this also necessitates a global variable OUTPUT_TYPE as we can not pass the output_type flag
-into the serialize method
- */
+// We need the custom Serialize incase someone uses the -o flag to pass a custom output type in
+// (show size in Mb / Gb etc).
+// Sadly this also necessitates a global variable OUTPUT_TYPE as we can not pass the output_type
+// flag into the serialize method
 impl Serialize for DisplayNode {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
     where

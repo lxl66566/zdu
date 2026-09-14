@@ -1,11 +1,13 @@
-use crate::dir_walker::WalkData;
-use crate::platform::get_metadata;
-use crate::utils::is_filtered_out_due_to_file_time;
-use crate::utils::is_filtered_out_due_to_invert_regex;
-use crate::utils::is_filtered_out_due_to_regex;
+use std::{cmp::Ordering, path::PathBuf};
 
-use std::cmp::Ordering;
-use std::path::PathBuf;
+use crate::{
+    dir_walker::WalkData,
+    platform::get_metadata,
+    utils::{
+        is_filtered_out_due_to_file_time, is_filtered_out_due_to_invert_regex,
+        is_filtered_out_due_to_regex,
+    },
+};
 
 #[derive(Debug, Eq, Clone)]
 pub struct Node {
@@ -64,7 +66,7 @@ pub fn build_node(
             ]
             .iter()
             .any(|(filter_time, actual_time)| {
-                is_filtered_out_due_to_file_time(filter_time, *actual_time)
+                is_filtered_out_due_to_file_time(filter_time.as_ref(), *actual_time)
             }) {
             0
         } else if by_filecount {

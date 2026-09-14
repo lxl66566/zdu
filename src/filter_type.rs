@@ -1,9 +1,9 @@
-use crate::display_node::DisplayNode;
-use crate::node::FileTime;
-use crate::node::Node;
-use std::collections::HashMap;
-use std::ffi::OsStr;
-use std::path::PathBuf;
+use std::{collections::HashMap, ffi::OsStr, path::PathBuf};
+
+use crate::{
+    display_node::DisplayNode,
+    node::{FileTime, Node},
+};
 
 #[derive(PartialEq, Eq, PartialOrd, Ord)]
 struct ExtensionNode<'a> {
@@ -14,7 +14,7 @@ struct ExtensionNode<'a> {
 pub fn get_all_file_types(
     top_level_nodes: &[Node],
     n: usize,
-    by_filetime: &Option<FileTime>,
+    by_filetime: Option<&FileTime>,
 ) -> DisplayNode {
     let ext_nodes = {
         let mut extension_cumulative_sizes = HashMap::new();
@@ -26,7 +26,7 @@ pub fn get_all_file_types(
 
         let mut extension_cumulative_sizes: Vec<ExtensionNode<'_>> = extension_cumulative_sizes
             .iter()
-            .map(|(&extension, &size)| ExtensionNode { extension, size })
+            .map(|(&extension, &size)| ExtensionNode { size, extension })
             .collect();
 
         extension_cumulative_sizes.sort_by(|lhs, rhs| lhs.cmp(rhs).reverse());
@@ -39,13 +39,16 @@ pub fn get_all_file_types(
     // First, collect the first N - 1 nodes...
     let mut displayed: Vec<DisplayNode> = ext_nodes_iter
         .by_ref()
-        .take(if n > 1 { n - 1 } else { 1 })
+        .take(if n > 1 {
+            n - 1
+        } else {
+            1
+        })
         .map(|node| DisplayNode {
-            name: PathBuf::from(
-                node.extension
-                    .map(|ext| format!(".{}", ext.to_string_lossy()))
-                    .unwrap_or_else(|| "(no extension)".to_owned()),
-            ),
+            name: PathBuf::from(node.extension.map_or_else(
+                || "(no extension)".to_owned(),
+                |ext| format!(".{}", ext.to_string_lossy()),
+            )),
             size: node.size,
             children: vec![],
         })
@@ -84,7 +87,7 @@ pub fn get_all_file_types(
 fn build_by_all_file_types<'a>(
     top_level_nodes: &'a [Node],
     counter: &mut HashMap<Option<&'a OsStr>, u64>,
-    by_filetime: &Option<FileTime>,
+    by_filetime: Option<&FileTime>,
 ) {
     for node in top_level_nodes {
         if node.name.is_file() {
@@ -97,7 +100,7 @@ fn build_by_all_file_types<'a>(
                 *cumulative_size += node.size;
             }
         }
-        build_by_all_file_types(&node.children, counter, by_filetime)
+        build_by_all_file_types(&node.children, counter, by_filetime);
     }
 }
 
@@ -127,7 +130,7 @@ mod tests {
         ];
 
         // 2 lines: '.toml' then '(others)', which sums to 60 and so must sort first
-        let tree = get_all_file_types(&nodes, 2, &None);
+        let tree = get_all_file_types(&nodes, 2, None);
 
         assert_eq!(tree.size, 100);
         let displayed: Vec<_> = tree
@@ -135,9 +138,9 @@ mod tests {
             .iter()
             .map(|c| (c.name.to_string_lossy().to_string(), c.size))
             .collect();
-        assert_eq!(
-            displayed,
-            vec![("(others)".to_string(), 60), (".toml".to_string(), 40)]
-        );
+        assert_eq!(displayed, vec![
+            ("(others)".to_string(), 60),
+            (".toml".to_string(), 40)
+        ]);
     }
 }

@@ -1,15 +1,14 @@
-use crate::node::FileTime;
+use std::{
+    path::{Path, PathBuf},
+    process,
+};
+
 use chrono::{Local, TimeZone};
 use config_file::FromConfigFile;
 use regex::Regex;
 use serde::Deserialize;
-use std::path::Path;
-use std::path::PathBuf;
-use std::process;
 
-use crate::cli::Cli;
-use crate::dir_walker::Operator;
-use crate::display::get_number_format;
+use crate::{cli::Cli, dir_walker::Operator, display::get_number_format, node::FileTime};
 
 pub static DAY_SECONDS: i64 = 24 * 60 * 60;
 
@@ -47,67 +46,79 @@ impl Config {
     pub fn get_files0_from(&self, options: &Cli) -> Option<String> {
         let from_file = &options.files0_from;
         match from_file {
-            None => self.files0_from.as_ref().map(|x| x.to_string()),
-            Some(x) => Some(x.to_string()),
+            None => self.files0_from.clone(),
+            Some(x) => Some(x.clone()),
         }
     }
 
     pub fn get_files_from(&self, options: &Cli) -> Option<String> {
         let from_file = &options.files_from;
         match from_file {
-            None => self.files_from.as_ref().map(|x| x.to_string()),
-            Some(x) => Some(x.to_string()),
+            None => self.files_from.clone(),
+            Some(x) => Some(x.clone()),
         }
     }
+
     pub fn get_no_colors(&self, options: &Cli) -> bool {
         Some(true) == self.no_colors || options.no_colors
     }
+
     pub fn get_force_colors(&self, options: &Cli) -> bool {
         Some(true) == self.force_colors || options.force_colors
     }
+
     pub fn get_disable_progress(&self, options: &Cli) -> bool {
         Some(true) == self.disable_progress || options.no_progress
     }
+
     pub fn get_apparent_size(&self, options: &Cli) -> bool {
         Some(true) == self.display_apparent_size || options.apparent_size
     }
+
     pub fn get_ignore_hidden(&self, options: &Cli) -> bool {
         Some(true) == self.ignore_hidden || options.ignore_hidden
     }
+
     pub fn get_limit_filesystem(&self, options: &Cli) -> bool {
         Some(true) == self.limit_filesystem || options.limit_filesystem
     }
+
     pub fn get_full_paths(&self, options: &Cli) -> bool {
         Some(true) == self.display_full_paths || options.full_paths
     }
+
     pub fn get_reverse(&self, options: &Cli) -> bool {
         Some(true) == self.reverse || options.reverse
     }
+
     pub fn get_no_bars(&self, options: &Cli) -> bool {
         Some(true) == self.no_bars || options.no_percent_bars
     }
+
     pub fn get_output_format(&self, options: &Cli) -> String {
         let out_fmt = options.output_format;
         (match out_fmt {
             None => match &self.output_format {
-                None => "".to_string(),
-                Some(x) => x.to_string(),
+                None => String::new(),
+                Some(x) => x.clone(),
             },
             Some(x) => x.to_string(),
         })
         .to_lowercase()
     }
 
-    pub fn get_filetime(&self, options: &Cli) -> Option<FileTime> {
+    pub fn get_filetime(options: &Cli) -> Option<FileTime> {
         options.filetime.map(FileTime::from)
     }
 
     pub fn get_skip_total(&self, options: &Cli) -> bool {
         Some(true) == self.skip_total || options.skip_total
     }
+
     pub fn get_screen_reader(&self, options: &Cli) -> bool {
         Some(true) == self.screen_reader || options.screen_reader
     }
+
     pub fn get_depth(&self, options: &Cli) -> usize {
         if let Some(v) = options.depth {
             return v;
@@ -115,11 +126,13 @@ impl Config {
 
         self.depth.unwrap_or(usize::MAX)
     }
+
     pub fn get_min_size(&self, options: &Cli) -> Option<usize> {
         let size_from_param = options.min_size.as_ref();
-        self._get_min_size(size_from_param)
+        self.get_min_size_from(size_from_param)
     }
-    fn _get_min_size(&self, min_size: Option<&String>) -> Option<usize> {
+
+    fn get_min_size_from(&self, min_size: Option<&String>) -> Option<usize> {
         let size_from_param = min_size.and_then(|a| convert_min_size(a));
 
         if size_from_param.is_none() {
@@ -130,6 +143,7 @@ impl Config {
             size_from_param
         }
     }
+
     pub fn get_only_dir(&self, options: &Cli) -> bool {
         Some(true) == self.only_dir || options.only_dir
     }
@@ -137,15 +151,19 @@ impl Config {
     pub fn get_print_errors(&self, options: &Cli) -> bool {
         Some(true) == self.print_errors || options.print_errors
     }
+
     pub fn get_only_file(&self, options: &Cli) -> bool {
         Some(true) == self.only_file || options.only_file
     }
+
     pub fn get_bars_on_right(&self, options: &Cli) -> bool {
         Some(true) == self.bars_on_right || options.bars_on_right
     }
+
     pub fn get_dim(&self, options: &Cli) -> bool {
         Some(true) == self.dim || options.dim
     }
+
     pub fn get_threads(&self, options: &Cli) -> Option<usize> {
         let from_cmd_line = options.threads;
         if from_cmd_line.is_none() {
@@ -154,6 +172,7 @@ impl Config {
             from_cmd_line
         }
     }
+
     pub fn get_output_json(&self, options: &Cli) -> bool {
         Some(true) == self.output_json || options.output_json
     }
@@ -167,15 +186,15 @@ impl Config {
         }
     }
 
-    pub fn get_modified_time_operator(&self, options: &Cli) -> Option<(Operator, i64)> {
+    pub fn get_modified_time_operator(options: &Cli) -> Option<(Operator, i64)> {
         get_filter_time_operator(options.mtime.as_ref(), get_current_date_epoch_seconds())
     }
 
-    pub fn get_accessed_time_operator(&self, options: &Cli) -> Option<(Operator, i64)> {
+    pub fn get_accessed_time_operator(options: &Cli) -> Option<(Operator, i64)> {
         get_filter_time_operator(options.atime.as_ref(), get_current_date_epoch_seconds())
     }
 
-    pub fn get_changed_time_operator(&self, options: &Cli) -> Option<(Operator, i64)> {
+    pub fn get_changed_time_operator(options: &Cli) -> Option<(Operator, i64)> {
         get_filter_time_operator(options.ctime.as_ref(), get_current_date_epoch_seconds())
     }
 
@@ -221,7 +240,7 @@ fn get_filter_time_operator(
                 '-' => Some((Operator::GreaterThan, time)),
                 _ => Some((Operator::Equal, time - DAY_SECONDS)),
             }
-        }
+        },
         None => None,
     }
 }
@@ -239,7 +258,8 @@ fn convert_min_size(input: &str) -> Option<usize> {
             Some(parsed_digits) => {
                 let number_format = get_number_format(&letters.to_lowercase());
                 match number_format {
-                    Some((multiple, _)) => Some(parsed_digits * (multiple as usize)),
+                    // try_from keeps this correct on 32-bit targets
+                    Some((multiple, _)) => Some(parsed_digits * usize::try_from(multiple).ok()?),
                     None => {
                         if letters.is_empty() {
                             Some(parsed_digits)
@@ -247,9 +267,9 @@ fn convert_min_size(input: &str) -> Option<usize> {
                             eprintln!("Ignoring invalid min-size: {input}");
                             None
                         }
-                    }
+                    },
                 }
-            }
+            },
             None => None,
         }
     } else {
@@ -257,12 +277,12 @@ fn convert_min_size(input: &str) -> Option<usize> {
     }
 }
 
-fn get_config_locations(base: PathBuf, config_home: Option<PathBuf>) -> Vec<PathBuf> {
-    let config_home = config_home.unwrap_or_else(|| base.join(".config"));
-    vec![
-        base.join(".zdu.toml"),
-        config_home.join("zdu").join("config.toml"),
-    ]
+fn get_config_locations(base: &Path, config_home: Option<&Path>) -> Vec<PathBuf> {
+    let config_dir = match config_home {
+        Some(path) => path.join("zdu"),
+        None => base.join(".config").join("zdu"),
+    };
+    vec![base.join(".zdu.toml"), config_dir.join("config.toml")]
 }
 
 pub fn get_config(conf_path: Option<&String>) -> Config {
@@ -273,20 +293,20 @@ pub fn get_config(conf_path: Option<&String>) -> Config {
                 match Config::from_config_file(path) {
                     Ok(config) => return config,
                     Err(e) => {
-                        eprintln!("Ignoring invalid config file '{}': {}", path.display(), e)
-                    }
+                        eprintln!("Ignoring invalid config file '{}': {}", path.display(), e);
+                    },
                 }
             } else {
                 eprintln!("Config file {:?} doesn't exists", path.display());
             }
-        }
+        },
         None => {
             if let Some(home) = std::env::home_dir() {
                 let config_home = std::env::var_os("XDG_CONFIG_HOME")
                     .filter(|path| !path.is_empty() && Path::new(path).is_absolute())
                     .map(PathBuf::from);
 
-                for path in get_config_locations(home, config_home) {
+                for path in get_config_locations(&home, config_home.as_deref()) {
                     if path.exists()
                         && let Ok(config) = Config::from_config_file(&path)
                     {
@@ -294,7 +314,7 @@ pub fn get_config(conf_path: Option<&String>) -> Config {
                     }
                 }
             }
-        }
+        },
     }
     Config {
         ..Default::default()
@@ -303,30 +323,25 @@ pub fn get_config(conf_path: Option<&String>) -> Config {
 
 #[cfg(test)]
 mod tests {
-    #[allow(unused_imports)]
-    use super::*;
     use chrono::{Datelike, Timelike};
     use clap::Parser;
+
+    #[allow(unused_imports)]
+    use super::*;
 
     #[test]
     fn config_locations_use_xdg_config_home() {
         let home = PathBuf::from("/home/test");
         let config_home = PathBuf::from("/tmp/config");
 
-        assert_eq!(
-            get_config_locations(home.clone(), Some(config_home)),
-            vec![
-                home.join(".zdu.toml"),
-                PathBuf::from("/tmp/config/zdu/config.toml"),
-            ]
-        );
-        assert_eq!(
-            get_config_locations(home.clone(), None),
-            vec![
-                home.join(".zdu.toml"),
-                home.join(".config/zdu/config.toml"),
-            ]
-        );
+        assert_eq!(get_config_locations(&home, Some(&config_home)), vec![
+            home.join(".zdu.toml"),
+            PathBuf::from("/tmp/config/zdu/config.toml"),
+        ]);
+        assert_eq!(get_config_locations(&home, None), vec![
+            home.join(".zdu.toml"),
+            home.join(".config/zdu/config.toml"),
+        ]);
     }
 
     #[test]
@@ -345,7 +360,7 @@ mod tests {
     #[test]
     fn test_conversion() {
         assert_eq!(convert_min_size("55"), Some(55));
-        assert_eq!(convert_min_size("12344321"), Some(12344321));
+        assert_eq!(convert_min_size("12344321"), Some(12_344_321));
         assert_eq!(convert_min_size("95RUBBISH"), None);
         assert_eq!(convert_min_size("10Ki"), Some(10 * 1024));
         assert_eq!(convert_min_size("10MiB"), Some(10 * 1024usize.pow(2)));
@@ -360,11 +375,11 @@ mod tests {
             min_size: Some("1KiB".to_owned()),
             ..Default::default()
         };
-        assert_eq!(c._get_min_size(None), Some(1024));
-        assert_eq!(c._get_min_size(Some(&"2KiB".into())), Some(2048));
+        assert_eq!(c.get_min_size_from(None), Some(1024));
+        assert_eq!(c.get_min_size_from(Some(&"2KiB".into())), Some(2048));
 
-        assert_eq!(c._get_min_size(Some(&"1kb".into())), Some(1000));
-        assert_eq!(c._get_min_size(Some(&"2KB".into())), Some(2000));
+        assert_eq!(c.get_min_size_from(Some(&"1kb".into())), Some(1000));
+        assert_eq!(c.get_min_size_from(Some(&"2KB".into())), Some(2000));
     }
 
     #[test]
@@ -403,36 +418,29 @@ mod tests {
     #[test]
     fn test_get_filetime() {
         // No config and no flag.
-        let c = Config::default();
         let args = get_filetime_args(vec!["zdu"]);
-        assert_eq!(c.get_filetime(&args), None);
+        assert_eq!(Config::get_filetime(&args), None);
 
         // Config is not defined and flag is defined as access time
-        let c = Config::default();
         let args = get_filetime_args(vec!["zdu", "--filetime", "a"]);
-        assert_eq!(c.get_filetime(&args), Some(FileTime::Accessed));
+        assert_eq!(Config::get_filetime(&args), Some(FileTime::Accessed));
 
-        let c = Config::default();
         let args = get_filetime_args(vec!["zdu", "--filetime", "accessed"]);
-        assert_eq!(c.get_filetime(&args), Some(FileTime::Accessed));
+        assert_eq!(Config::get_filetime(&args), Some(FileTime::Accessed));
 
         // Config is not defined and flag is defined as modified time
-        let c = Config::default();
         let args = get_filetime_args(vec!["zdu", "--filetime", "m"]);
-        assert_eq!(c.get_filetime(&args), Some(FileTime::Modified));
+        assert_eq!(Config::get_filetime(&args), Some(FileTime::Modified));
 
-        let c = Config::default();
         let args = get_filetime_args(vec!["zdu", "--filetime", "modified"]);
-        assert_eq!(c.get_filetime(&args), Some(FileTime::Modified));
+        assert_eq!(Config::get_filetime(&args), Some(FileTime::Modified));
 
         // Config is not defined and flag is defined as changed time
-        let c = Config::default();
         let args = get_filetime_args(vec!["zdu", "--filetime", "c"]);
-        assert_eq!(c.get_filetime(&args), Some(FileTime::Changed));
+        assert_eq!(Config::get_filetime(&args), Some(FileTime::Changed));
 
-        let c = Config::default();
         let args = get_filetime_args(vec!["zdu", "--filetime", "changed"]);
-        assert_eq!(c.get_filetime(&args), Some(FileTime::Changed));
+        assert_eq!(Config::get_filetime(&args), Some(FileTime::Changed));
     }
 
     fn get_filetime_args(args: Vec<&str>) -> Cli {

@@ -7,6 +7,8 @@ use clap::{Parser, ValueEnum, ValueHint};
 
 /// Like du but more intuitive
 #[derive(Debug, Parser)]
+// CLI flags map 1:1 to command line switches; boolean options are inherent here
+#[allow(clippy::struct_excessive_bools)]
 #[command(name("zdu"), version)]
 pub struct Cli {
     /// Depth to show
