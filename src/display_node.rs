@@ -80,6 +80,7 @@ impl Serialize for DisplayNode {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::node::encode_filetime;
 
     #[cfg(unix)]
     #[test]
@@ -93,5 +94,50 @@ mod tests {
         // must not panic / error on invalid UTF-8 (pdu BUG-5 lesson)
         let json = serde_json::to_string(&node).expect("lossy serialization");
         assert!(json.contains("name"));
+    }
+
+    // -j is a user-facing API: field names, order and size formatting are
+    // stable contract. Locks the exact serialized form per JsonSizeFormat.
+    #[test]
+    fn json_serialization_exact_bytes() {
+        let tree = DisplayNode {
+            size: 3 * (1_u64 << 30) + (1_u64 << 29),
+            name: PathBuf::from("/a"),
+            children: vec![DisplayNode {
+                size: 4096,
+                name: PathBuf::from("/a/b"),
+                children: vec![],
+            }],
+        };
+
+        // Default OUTPUT_TYPE is Human(""): sizes render human-readable
+        let json = serde_json::to_string(&tree).unwrap();
+        assert_eq!(
+            json,
+            r#"{"size":"3.5Gi","name":"/a","children":[{"size":"4.0Ki","name":"/a/b","children":[]}]}"#
+        );
+
+        // -m: raw decoded integer timestamps; -f: raw counts
+        OUTPUT_TYPE.with(|fmt| {
+            fmt.replace(JsonSizeFormat::Timestamp);
+        });
+        let ts_tree = DisplayNode {
+            size: encode_filetime(1_788_493_354),
+            name: PathBuf::from("/a"),
+            children: vec![],
+        };
+        let json = serde_json::to_string(&ts_tree).unwrap();
+        assert_eq!(json, r#"{"size":1788493354,"name":"/a","children":[]}"#);
+
+        OUTPUT_TYPE.with(|fmt| {
+            fmt.replace(JsonSizeFormat::Count);
+        });
+        let json = serde_json::to_string(&tree).unwrap();
+        assert_eq!(json, r#"{"size":3758096384,"name":"/a","children":[{"size":4096,"name":"/a/b","children":[]}]}"#);
+
+        // restore the thread-local default for other tests
+        OUTPUT_TYPE.with(|fmt| {
+            fmt.replace(JsonSizeFormat::Human(String::new()));
+        });
     }
 }

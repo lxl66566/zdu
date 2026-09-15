@@ -16,7 +16,7 @@ use std::{
     env,
     fs::{read, read_to_string},
     io,
-    io::Read,
+    io::{Read, Write},
     panic,
     path::PathBuf,
     process,
@@ -344,7 +344,16 @@ fn print_output(
                 wrapped.replace(JsonSizeFormat::Human(output_format));
             }
         });
-        println!("{}", serde_json::to_string(&tree).unwrap());
+        // PERF-10: stream the JSON instead of materializing the whole
+        // String first (~tens of MB for big trees, doubling peak memory and
+        // delaying all output until serialization finishes). to_writer +
+        // trailing newline is byte-identical to the old
+        // println!(to_string(...)).
+        let stdout = io::stdout();
+        let mut out = io::BufWriter::with_capacity(64 * 1024, stdout.lock());
+        serde_json::to_writer(&mut out, &tree).unwrap();
+        writeln!(out).unwrap();
+        out.flush().unwrap();
     } else {
         let idd = InitialDisplayData {
             short_paths: !config.get_full_paths(options),
