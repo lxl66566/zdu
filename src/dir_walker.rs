@@ -50,6 +50,20 @@ pub struct WalkData<'a> {
     pub errors: Arc<Mutex<RuntimeErrors>>,
 }
 
+// How walk_dir decides whether a PendingDir's path is a directory. Carrying
+// the classification (from data already in hand) avoids a fresh stat per
+// directory: ~176k redundant statx on /nix/store (PERF-6).
+#[derive(Debug, PartialEq)]
+enum DirKind {
+    /// readdir d_type already confirmed a real directory (not a symlink):
+    /// walk unconditionally, no stat needed.
+    TypedDir,
+    /// Root path or a -L followed symlink: type is not known from d_type
+    /// alone, walk_dir falls back to stat-based classification (once per
+    /// root / once per followed link, so the cost is negligible).
+    StatClassified,
+}
+
 // Per-directory bookkeeping used during the parallel walk. Each directory gets
 // one `PendingDir`. Subdirectory tasks hold an `Arc` back to their parent so
 // they can push their finished `Node` into the parent's `children` and
@@ -58,6 +72,7 @@ pub struct WalkData<'a> {
 struct PendingDir {
     dir: PathBuf,
     depth: usize,
+    kind: DirKind,
     // PERF-2: fetched once when the entry is discovered (with follow-links
     // semantics), reused when the finished directory Node is built
     metadata: Option<EntryMetadata>,
@@ -118,6 +133,8 @@ fn walk_root(
     let outer = Arc::new(PendingDir {
         dir: PathBuf::new(),
         depth: 0,
+        // Never walked, only drained; value is irrelevant
+        kind: DirKind::StatClassified,
         metadata: None,
         followed_dir_ids: followed_dir_ids.clone(),
         parent: None,
@@ -134,6 +151,10 @@ fn walk_root(
     let root = Arc::new(PendingDir {
         dir: d,
         depth: 0,
+        // Roots keep the stat-based classification: the lstat metadata
+        // alone cannot express "symlink points to a directory" without -L,
+        // which `Path::is_dir` currently resolves by following
+        kind: DirKind::StatClassified,
         metadata: root_metadata,
         followed_dir_ids,
         parent: Some(outer.clone()),
@@ -324,7 +345,15 @@ fn walk_dir<'scope>(
     pending: Arc<PendingDir>,
     walk_data: &'scope WalkData<'scope>,
 ) {
-    if pending.dir.is_dir() {
+    // PERF-6: classify from data in hand instead of a fresh `is_dir()` stat
+    // per directory. Only roots and -L followed symlinks pay the stat: its
+    // follow semantics decide walk vs file-node vs file_not_found error,
+    // which d_type/lstat metadata alone cannot express.
+    let is_dir = match pending.kind {
+        DirKind::TypedDir => true,
+        DirKind::StatClassified => pending.dir.is_dir(),
+    };
+    if is_dir {
         // Canonicalized once per directory, reused for every entry's ignore
         // check (PERF-1). Only needed when absolute ignore paths are in play.
         let canonical_dir: Option<PathBuf> = if walk_data
@@ -480,6 +509,13 @@ fn process_entry<'scope>(
         let child = Arc::new(PendingDir {
             dir: path,
             depth: pending.depth + 1,
+            // Entries reaching this branch are d_type dirs or (only under
+            // -L) followed symlinks whose target type is unknown until walk
+            kind: if file_type.is_dir() {
+                DirKind::TypedDir
+            } else {
+                DirKind::StatClassified
+            },
             metadata,
             followed_dir_ids: pending.followed_dir_ids.clone(),
             parent: Some(pending.clone()),
