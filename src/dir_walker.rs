@@ -185,45 +185,65 @@ fn walk_root(
 }
 
 // Remove files which have the same inode, we don't want to double count them.
-fn clean_inodes(x: Node, inodes: &mut HashSet<(u64, u64)>, walk_data: &WalkData) -> Option<Node> {
-    if !walk_data.use_apparent_size
-        && let Some(id) = x.inode_device
-        && !inodes.insert(id)
-    {
-        return None;
+// PERF-7: sorts and retains in place instead of rebuilding every Node/Vec,
+// removing the second full allocation round over the tree. Under apparent
+// size (-p) there is nothing to dedup, so the sort is skipped too: the sort
+// only exists to pick a deterministic hardlink winner, and every consumer
+// (display/JSON/-t) re-sorts by size anyway.
+fn clean_inodes(mut x: Node, inodes: &mut HashSet<(u64, u64)>, walk_data: &WalkData) -> Option<Node> {
+    if !walk_data.use_apparent_size {
+        if let Some(id) = x.inode_device
+            && !inodes.insert(id)
+        {
+            return None;
+        }
+        x.children.sort_by(sort_by_inode);
     }
+    // Recurse by value through a placeholder swap (Node has no Default);
+    // deduped children are dropped in place, capacity is kept. Must run in
+    // both modes: the bottom-up size fold below depends on the recursion,
+    // so skipping it under -p would drop file sizes from dir totals
+    x.children.retain_mut(|c| {
+        let taken = std::mem::replace(c, placeholder_node());
+        match clean_inodes(taken, inodes, walk_data) {
+            Some(cleaned) => {
+                *c = cleaned;
+                true
+            },
+            None => false,
+        }
+    });
+    aggregate_size(&mut x, walk_data.by_filetime.is_some());
+    Some(x)
+}
 
-    // Sort Nodes so iteration order is predictable
-    let mut tmp: Vec<_> = x.children;
-    tmp.sort_by(sort_by_inode);
-    let new_children: Vec<_> = tmp
-        .into_iter()
-        .filter_map(|c| clean_inodes(c, inodes, walk_data))
-        .collect();
-
-    let actual_size = if walk_data.by_filetime.is_some() {
-        // If by_filetime is Some, directory 'size' is the maximum filetime among child files
-        // instead of disk size
-        new_children
+// Directory 'size' is the sum of child sizes (bytes / counts) or the max
+// child filetime (-m), per the original clean_inodes semantics
+fn aggregate_size(x: &mut Node, by_filetime: bool) {
+    // Children are already final here (clean_inodes aggregates bottom-up),
+    // so fold one level only: re-descending would fold grandchildren into
+    // the children a second time
+    x.size = if by_filetime {
+        x.children
             .iter()
             .map(|c| c.size)
-            .chain(std::iter::once(x.size))
-            .max()
-            .unwrap_or(0)
+            .fold(x.size, u64::max)
     } else {
-        // If by_filetime is None, directory 'size' is the sum of disk sizes or file counts of child
-        // files
-        x.size + new_children.iter().map(|c| c.size).sum::<u64>()
+        x.size + x.children.iter().map(|c| c.size).sum::<u64>()
     };
+}
 
-    Some(Node {
-        name: x.name,
-        size: actual_size,
-        children: new_children,
-        inode_device: x.inode_device,
-        depth: x.depth,
-        is_file: x.is_file,
-    })
+// Cheap filler for by-value recursion into &mut slots (empty PathBuf and
+// empty Vec allocate nothing)
+fn placeholder_node() -> Node {
+    Node {
+        name: PathBuf::new(),
+        size: 0,
+        children: Vec::new(),
+        inode_device: None,
+        depth: 0,
+        is_file: false,
+    }
 }
 
 fn sort_by_inode(a: &Node, b: &Node) -> Ordering {
@@ -817,6 +837,26 @@ mod tests {
         assert_eq!(result.len(), 1);
         assert_eq!(result[0].children.len(), N);
         assert_eq!(count_nodes(&result[0]), N + 1);
+    }
+
+    // Regression: skipping the dedup pass under apparent size must not skip
+    // the recursion -- dir totals must still include file sizes
+    #[cfg(unix)]
+    #[test]
+    fn test_apparent_size_dir_totals_include_files() {
+        let tmp = tempfile::tempdir().unwrap();
+        fs::write(tmp.path().join("six"), b"abcdef").unwrap();
+
+        let walkdata = create_walker(true);
+        let mut roots = HashSet::new();
+        roots.insert(tmp.path().to_path_buf());
+
+        let result = walk_it(roots, &walkdata);
+        // root size = the directory's own apparent length + the file's
+        let dir_own = fs::metadata(tmp.path()).unwrap().len();
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].size, dir_own + 6);
+        assert_eq!(result[0].children[0].size, 6);
     }
 
     #[test]
