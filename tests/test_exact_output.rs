@@ -302,6 +302,12 @@ fn apparent_size_output() -> Vec<String> {
 #[cfg_attr(target_os = "windows", ignore = "exact output varies by windows host")]
 #[test]
 pub fn test_permission_normal() {
+    initialize();
+    // chmod 000 cannot stop root; skip when the dir stays readable
+    if std::fs::read_dir(UNREADABLE_DIR_PATH).is_ok() {
+        eprintln!("skipping: {UNREADABLE_DIR_PATH} is readable (running as root?)");
+        return;
+    }
     let command_args = [UNREADABLE_DIR_PATH];
     let permission_msg =
         r"Did not have permissions for all directories (add --print-errors to see errors)"
@@ -313,6 +319,12 @@ pub fn test_permission_normal() {
 #[cfg_attr(target_os = "windows", ignore = "exact output varies by windows host")]
 #[test]
 pub fn test_permission_flag() {
+    initialize();
+    // chmod 000 cannot stop root; skip when the dir stays readable
+    if std::fs::read_dir(UNREADABLE_DIR_PATH).is_ok() {
+        eprintln!("skipping: {UNREADABLE_DIR_PATH} is readable (running as root?)");
+        return;
+    }
     // add the flag to CLI
     let command_args = ["--print-errors", UNREADABLE_DIR_PATH];
     let permission_msg = format!("Did not have permissions for directories: {UNREADABLE_DIR_PATH}");
