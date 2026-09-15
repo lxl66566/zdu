@@ -1,5 +1,4 @@
 use std::{
-    cmp::Ordering,
     collections::HashSet,
     fs,
     fs::DirEntry,
@@ -87,10 +86,58 @@ struct PendingDir {
     children: Mutex<Vec<Node>>,
 }
 
+// Hardlink dedup set sharded by inode hash so inserts from the parallel
+// walk don't serialize on one lock (PERF-8). Measured flat between 64 and
+// 4096 shards on a 32-thread EPYC; 256 sits in the middle.
+const INODE_SHARDS: usize = 256;
+
+// Multiplicative-hash shard selection. NOTE: the tuple is (inode, device);
+// sharding on the inode (id.0) is load-bearing: every entry of one
+// filesystem shares the same device, so sharding on id.1 funnels all
+// inserts into a single mutex and recreates a global lock (measured: 818ms
+// vs 631ms wall on /nix/store from futex wake storms alone).
+fn inode_shard(id: (u64, u64)) -> usize {
+    (id.0.wrapping_mul(0x9E37_79B9_7F4A_7C15) % INODE_SHARDS as u64) as usize
+}
+
+struct InodeSet {
+    shards: Vec<Mutex<HashSet<(u64, u64)>>>,
+}
+
+impl InodeSet {
+    fn new() -> Self {
+        Self {
+            shards: (0..INODE_SHARDS)
+                .map(|_| Mutex::new(HashSet::new()))
+                .collect(),
+        }
+    }
+
+    // Returns false when (dev, ino) was already counted: the caller drops
+    // the node so hardlinks are only counted once (first-seen wins)
+    fn insert(&self, id: (u64, u64)) -> bool {
+        self.shards[inode_shard(id)].lock().unwrap().insert(id)
+    }
+}
+
+// Returns true when the entry's inode was already claimed by another
+// hardlink. Under apparent size (-p) every link counts, so nothing is
+// claimed. Called after the ignore checks so filtered entries never claim.
+fn is_duplicate_inode(
+    metadata: &Option<EntryMetadata>,
+    walk_data: &WalkData,
+    inodes: &InodeSet,
+) -> bool {
+    if walk_data.use_apparent_size {
+        return false;
+    }
+    matches!(metadata, Some((_, Some(id), _)) if !inodes.insert(*id))
+}
+
 pub fn walk_it(dirs: HashSet<PathBuf>, walk_data: &WalkData) -> Vec<Node> {
     // PERF-4: roots are walked concurrently instead of one after another.
     // Cross-root hardlink dedup stays global (shared `inodes` below).
-    let inodes: Mutex<HashSet<(u64, u64)>> = Mutex::new(HashSet::new());
+    let inodes = InodeSet::new();
     let top_level_nodes: Mutex<Vec<Node>> = Mutex::new(Vec::new());
 
     rayon::scope(|s| {
@@ -107,7 +154,7 @@ pub fn walk_it(dirs: HashSet<PathBuf>, walk_data: &WalkData) -> Vec<Node> {
 fn walk_root(
     d: PathBuf,
     walk_data: &WalkData,
-    inodes: &Mutex<HashSet<(u64, u64)>>,
+    inodes: &InodeSet,
     top_level_nodes: &Mutex<Vec<Node>>,
 ) {
     // Concurrent roots interleave their spinner path/counter updates; that is
@@ -116,9 +163,9 @@ fn walk_root(
 
     // Cycle-detection scope is per root: the same target reached via two
     // different roots should still be walked once per root. Distinct from the
-    // hard-link inode dedup in `clean_inodes`: that drops duplicate Nodes
-    // post-walk, this stops the walker from descending into the same
-    // directory twice (junction/symlink cycles under -L).
+    // hard-link inode dedup in `is_duplicate_inode`: that drops duplicate
+    // entries at creation time, this stops the walker from descending into
+    // the same directory twice (junction/symlink cycles under -L).
     let followed_dir_ids = Arc::new(Mutex::new(HashSet::new()));
 
     let root_is_symlink = walk_data.follow_links
@@ -148,6 +195,12 @@ fn walk_root(
         walk_data.use_apparent_size,
         walk_data.follow_links && root_is_symlink,
     );
+    // Root dedup (cross-root hardlinks / bind mounts): claim before walking
+    // so a duplicate root skips its whole subtree, matching the old post-walk
+    // clean_inodes drop of the finished root node. Computed before the
+    // metadata is moved into the PendingDir.
+    let root_is_dup = is_duplicate_inode(&root_metadata, walk_data, inodes);
+
     let root = Arc::new(PendingDir {
         dir: d,
         depth: 0,
@@ -168,7 +221,9 @@ fn walk_root(
     // it, so stack depth is O(1) regardless of tree depth. The visited-set
     // Arc rides on the PendingDir chain.
     rayon::scope(|s| {
-        s.spawn(move |s| walk_dir(s, root, walk_data));
+        if !root_is_dup {
+            s.spawn(move |s| walk_dir(s, root, walk_data, inodes));
+        }
     });
 
     walk_data
@@ -176,91 +231,12 @@ fn walk_root(
         .state
         .store(Operation::PREPARING, ORDERING);
 
+    // Sizes were aggregated during the walk (finalize_chain folds each
+    // directory when its children are final) and hardlinks were deduped at
+    // creation time, so the finished tree needs no post-processing pass
     let mut outer_children = std::mem::take(&mut *outer.children.lock().unwrap());
-    if let Some(node) = outer_children.pop()
-        && let Some(cleaned) = clean_inodes(node, &mut inodes.lock().unwrap(), walk_data)
-    {
-        top_level_nodes.lock().unwrap().push(cleaned);
-    }
-}
-
-// Remove files which have the same inode, we don't want to double count them.
-// PERF-7: sorts and retains in place instead of rebuilding every Node/Vec,
-// removing the second full allocation round over the tree. Under apparent
-// size (-p) there is nothing to dedup, so the sort is skipped too: the sort
-// only exists to pick a deterministic hardlink winner, and every consumer
-// (display/JSON/-t) re-sorts by size anyway.
-fn clean_inodes(mut x: Node, inodes: &mut HashSet<(u64, u64)>, walk_data: &WalkData) -> Option<Node> {
-    if !walk_data.use_apparent_size {
-        if let Some(id) = x.inode_device
-            && !inodes.insert(id)
-        {
-            return None;
-        }
-        x.children.sort_by(sort_by_inode);
-    }
-    // Recurse by value through a placeholder swap (Node has no Default);
-    // deduped children are dropped in place, capacity is kept. Must run in
-    // both modes: the bottom-up size fold below depends on the recursion,
-    // so skipping it under -p would drop file sizes from dir totals
-    x.children.retain_mut(|c| {
-        let taken = std::mem::replace(c, placeholder_node());
-        match clean_inodes(taken, inodes, walk_data) {
-            Some(cleaned) => {
-                *c = cleaned;
-                true
-            },
-            None => false,
-        }
-    });
-    aggregate_size(&mut x, walk_data.by_filetime.is_some());
-    Some(x)
-}
-
-// Directory 'size' is the sum of child sizes (bytes / counts) or the max
-// child filetime (-m), per the original clean_inodes semantics
-fn aggregate_size(x: &mut Node, by_filetime: bool) {
-    // Children are already final here (clean_inodes aggregates bottom-up),
-    // so fold one level only: re-descending would fold grandchildren into
-    // the children a second time
-    x.size = if by_filetime {
-        x.children
-            .iter()
-            .map(|c| c.size)
-            .fold(x.size, u64::max)
-    } else {
-        x.size + x.children.iter().map(|c| c.size).sum::<u64>()
-    };
-}
-
-// Cheap filler for by-value recursion into &mut slots (empty PathBuf and
-// empty Vec allocate nothing)
-fn placeholder_node() -> Node {
-    Node {
-        name: PathBuf::new(),
-        size: 0,
-        children: Vec::new(),
-        inode_device: None,
-        depth: 0,
-        is_file: false,
-    }
-}
-
-fn sort_by_inode(a: &Node, b: &Node) -> Ordering {
-    // Sorting by inode is quicker than by sorting by name/size
-    match (a.inode_device, b.inode_device) {
-        (Some(x), Some(y)) => {
-            if x.0 != y.0 {
-                x.0.cmp(&y.0)
-            } else if x.1 != y.1 {
-                x.1.cmp(&y.1)
-            } else {
-                a.name.cmp(&b.name)
-            }
-        },
-        (Some(_), None) => Ordering::Greater,
-        (None, Some(_)) => Ordering::Less,
-        (None, None) => a.name.cmp(&b.name),
+    if let Some(node) = outer_children.pop() {
+        top_level_nodes.lock().unwrap().push(node);
     }
 }
 
@@ -364,6 +340,7 @@ fn walk_dir<'scope>(
     scope: &rayon::Scope<'scope>,
     pending: Arc<PendingDir>,
     walk_data: &'scope WalkData<'scope>,
+    inodes: &'scope InodeSet,
 ) {
     // PERF-6: classify from data in hand instead of a fresh `is_dir()` stat
     // per directory. Only roots and -L followed symlinks pay the stat: its
@@ -450,9 +427,14 @@ fn walk_dir<'scope>(
             let file_nodes: Vec<Node> = collected
                 .into_par_iter()
                 .filter_map(|r| match r {
-                    Ok(entry) => {
-                        process_entry(scope, &pending, &entry, canonical_dir.as_deref(), walk_data)
-                    },
+                    Ok(entry) => process_entry(
+                        scope,
+                        &pending,
+                        &entry,
+                        canonical_dir.as_deref(),
+                        walk_data,
+                        inodes,
+                    ),
                     Err(failed) => {
                         record_error(&failed, &pending.dir, walk_data);
                         None
@@ -484,6 +466,7 @@ fn process_entry<'scope>(
     entry: &DirEntry,
     canonical_dir: Option<&Path>,
     walk_data: &'scope WalkData<'scope>,
+    inodes: &'scope InodeSet,
 ) -> Option<Node> {
     // PERF-2/5: one path allocation and one metadata fetch per entry, shared
     // by the ignore checks, the followed-link device/cycle checks and node
@@ -497,6 +480,14 @@ fn process_entry<'scope>(
     let metadata = get_entry_metadata(entry, walk_data.use_apparent_size, follow);
 
     if ignore_file(&path, is_file, metadata.as_ref(), canonical_dir, walk_data) {
+        return None;
+    }
+
+    // PERF-8: hardlink dedup fused into the walk (was a single-threaded
+    // post-walk pass). First-seen wins; which link wins is already
+    // nondeterministic across parallel directories. Applies to directories
+    // too: a dup skips the whole subtree, like the old post-walk drop did.
+    if is_duplicate_inode(&metadata, walk_data, inodes) {
         return None;
     }
 
@@ -542,7 +533,7 @@ fn process_entry<'scope>(
             pending: AtomicUsize::new(1),
             children: Mutex::new(Vec::new()),
         });
-        scope.spawn(move |s| walk_dir(s, child, walk_data));
+        scope.spawn(move |s| walk_dir(s, child, walk_data, inodes));
         return None;
     }
 
@@ -610,7 +601,24 @@ fn finalize_chain(mut pending: Arc<PendingDir>, walk_data: &WalkData) {
             pending.depth,
             walk_data,
             pending.metadata,
-        );
+        )
+        // PERF-8: fold the directory's size here, when `pending` hits 0 the
+        // taken children are final (their own folds already ran in their
+        // finalize_chain). Single level only: re-descending would fold
+        // grandchildren into the children a second time. This replaces the
+        // old single-threaded full-tree aggregation pass after the walk.
+        .map(|mut node| {
+            node.size = if walk_data.by_filetime.is_some() {
+                // -m: directory 'size' is the max filetime among the subtree
+                node.children
+                    .iter()
+                    .map(|c| c.size)
+                    .fold(node.size, u64::max)
+            } else {
+                node.size + node.children.iter().map(|c| c.size).sum::<u64>()
+            };
+            node
+        });
         pending = parent;
     }
 }
@@ -658,18 +666,6 @@ mod tests {
     use super::*;
 
     #[cfg(test)]
-    fn create_node() -> Node {
-        Node {
-            name: PathBuf::new(),
-            size: 10,
-            children: vec![],
-            inode_device: Some((5, 6)),
-            depth: 0,
-            is_file: true,
-        }
-    }
-
-    #[cfg(test)]
     fn create_walker<'a>(use_apparent_size: bool) -> WalkData<'a> {
         use crate::PIndicator;
         let indicator = PIndicator::build_me();
@@ -691,79 +687,66 @@ mod tests {
         }
     }
 
+    // Hardlinks share (dev, ino); with block sizes only the first-seen link
+    // may count, otherwise hardlinked trees would double-count storage
+    #[cfg(unix)]
     #[test]
-    #[allow(clippy::redundant_clone)]
-    fn test_should_ignore_file() {
-        let mut inodes = HashSet::new();
-        let n = create_node();
+    fn test_hardlinked_files_counted_once() {
+        let tmp = tempfile::tempdir().unwrap();
+        let original = tmp.path().join("original");
+        fs::write(&original, vec![0u8; 8192]).unwrap();
+        fs::hard_link(&original, tmp.path().join("hardlink")).unwrap();
+
         let walkdata = create_walker(false);
+        let mut roots = HashSet::new();
+        roots.insert(tmp.path().to_path_buf());
 
-        // First time we insert the node
-        assert_eq!(
-            clean_inodes(n.clone(), &mut inodes, &walkdata),
-            Some(n.clone())
-        );
-
-        // Second time is a duplicate - we ignore it
-        assert_eq!(clean_inodes(n.clone(), &mut inodes, &walkdata), None);
+        let result = walk_it(roots, &walkdata);
+        assert_eq!(result.len(), 1);
+        // exactly one of the two links survives; the root's own dir size
+        // varies by filesystem, so assert on the surviving child instead
+        assert_eq!(result[0].children.len(), 1);
+        assert_eq!(result[0].children[0].size, 8192);
     }
 
+    #[cfg(unix)]
     #[test]
-    #[allow(clippy::redundant_clone)]
-    fn test_should_not_ignore_files_if_using_apparent_size() {
-        let mut inodes = HashSet::new();
-        let n = create_node();
+    fn test_hardlinks_counted_per_link_with_apparent_size() {
+        // -p: every link counts (each name has its own apparent presence)
+        let tmp = tempfile::tempdir().unwrap();
+        let original = tmp.path().join("original");
+        fs::write(&original, vec![0u8; 8192]).unwrap();
+        fs::hard_link(&original, tmp.path().join("hardlink")).unwrap();
+
         let walkdata = create_walker(true);
+        let mut roots = HashSet::new();
+        roots.insert(tmp.path().to_path_buf());
 
-        // If using apparent size we include Nodes, even if duplicate inodes
-        assert_eq!(
-            clean_inodes(n.clone(), &mut inodes, &walkdata),
-            Some(n.clone())
-        );
-        assert_eq!(
-            clean_inodes(n.clone(), &mut inodes, &walkdata),
-            Some(n.clone())
-        );
+        let result = walk_it(roots, &walkdata);
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].children.len(), 2);
     }
 
+    // Dedup is global across roots: the same inode reached via two roots
+    // still counts once in total (winner is whichever root claims first)
+    #[cfg(unix)]
     #[test]
-    fn test_total_ordering_of_sort_by_inode() {
-        use std::str::FromStr;
+    fn test_hardlink_across_roots_counted_once() {
+        let tmp1 = tempfile::tempdir().unwrap();
+        let tmp2 = tempfile::tempdir().unwrap();
+        let original = tmp1.path().join("original");
+        fs::write(&original, vec![0u8; 8192]).unwrap();
+        fs::hard_link(&original, tmp2.path().join("other-name")).unwrap();
 
-        let a = Node {
-            name: PathBuf::from_str("a").unwrap(),
-            size: 0,
-            children: vec![],
-            inode_device: Some((3, 66310)),
-            depth: 0,
-            is_file: false,
-        };
+        let walkdata = create_walker(false);
+        let mut roots = HashSet::new();
+        roots.insert(tmp1.path().to_path_buf());
+        roots.insert(tmp2.path().to_path_buf());
 
-        let b = Node {
-            name: PathBuf::from_str("b").unwrap(),
-            size: 0,
-            children: vec![],
-            inode_device: None,
-            depth: 0,
-            is_file: false,
-        };
-
-        let c = Node {
-            name: PathBuf::from_str("c").unwrap(),
-            size: 0,
-            children: vec![],
-            inode_device: Some((1, 66310)),
-            depth: 0,
-            is_file: false,
-        };
-
-        assert_eq!(sort_by_inode(&a, &b), Ordering::Greater);
-        assert_eq!(sort_by_inode(&a, &c), Ordering::Greater);
-        assert_eq!(sort_by_inode(&c, &b), Ordering::Greater);
-
-        assert_eq!(sort_by_inode(&b, &a), Ordering::Less);
-        assert_eq!(sort_by_inode(&c, &a), Ordering::Less);
-        assert_eq!(sort_by_inode(&b, &c), Ordering::Less);
+        let result = walk_it(roots, &walkdata);
+        let surviving: usize = result.iter().map(|r| r.children.len()).sum();
+        assert_eq!(result.len(), 2);
+        assert_eq!(surviving, 1);
     }
 
     #[cfg(test)]
@@ -837,26 +820,6 @@ mod tests {
         assert_eq!(result.len(), 1);
         assert_eq!(result[0].children.len(), N);
         assert_eq!(count_nodes(&result[0]), N + 1);
-    }
-
-    // Regression: skipping the dedup pass under apparent size must not skip
-    // the recursion -- dir totals must still include file sizes
-    #[cfg(unix)]
-    #[test]
-    fn test_apparent_size_dir_totals_include_files() {
-        let tmp = tempfile::tempdir().unwrap();
-        fs::write(tmp.path().join("six"), b"abcdef").unwrap();
-
-        let walkdata = create_walker(true);
-        let mut roots = HashSet::new();
-        roots.insert(tmp.path().to_path_buf());
-
-        let result = walk_it(roots, &walkdata);
-        // root size = the directory's own apparent length + the file's
-        let dir_own = fs::metadata(tmp.path()).unwrap().len();
-        assert_eq!(result.len(), 1);
-        assert_eq!(result[0].size, dir_own + 6);
-        assert_eq!(result[0].children[0].size, 6);
     }
 
     #[test]

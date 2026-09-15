@@ -77,18 +77,25 @@ pub fn test_hard_sym_link() {
     let link_name = dir.path().join("the_link");
     link_it(&link_name, file_path_s, false);
 
-    let file_output = format!(" ┌── {file_path_s}");
     let dirs_output = format!("─┴ {dir_s}");
+    let link_name_s = link_name.to_str().unwrap();
 
     let mut cmd = cargo_bin_cmd!("zdu");
     // Mac test runners create long filenames in tmp directories
     let output = cmd.args(["-p", "-c", "-w", "999", dir_s]).unwrap().stdout;
 
-    // The link should not appear in the output because multiple inodes are now ordered
-    // then filtered.
+    // Hardlink dedup keeps exactly one of the two names. Which one survives
+    // is first-seen and depends on readdir order (same semantics as du);
+    // the previous deterministic winner came from the removed post-walk
+    // inode sort.
     let output = str::from_utf8(&output).unwrap();
     assert!(output.contains(dirs_output.as_str()));
-    assert!(output.contains(file_output.as_str()));
+    let file_shown = output.contains(file_path_s);
+    let link_shown = output.contains(link_name_s);
+    assert!(
+        file_shown ^ link_shown,
+        "exactly one hardlink name must survive, got file={file_shown} link={link_shown}"
+    );
 }
 
 #[cfg_attr(
