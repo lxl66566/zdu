@@ -317,12 +317,12 @@ fn parse_min_size(input: &str) -> Option<usize> {
     usize::try_from(total).ok()
 }
 
-fn get_config_locations(base: &Path, config_home: Option<&Path>) -> Vec<PathBuf> {
-    let config_dir = match config_home {
+fn get_config_location(base: &Path, config_home: Option<&Path>) -> PathBuf {
+    match config_home {
         Some(path) => path.join("zdu"),
         None => base.join(".config").join("zdu"),
-    };
-    vec![base.join(".zdu.toml"), config_dir.join("config.toml")]
+    }
+    .join("config.toml")
 }
 
 pub fn get_config(conf_path: Option<&String>) -> Config {
@@ -346,20 +346,15 @@ pub fn get_config(conf_path: Option<&String>) -> Config {
                     .filter(|path| !path.is_empty() && Path::new(path).is_absolute())
                     .map(PathBuf::from);
 
-                for path in get_config_locations(&home, config_home.as_deref()) {
-                    if path.exists() {
-                        // Same warning as an explicit --config: a present but
-                        // unparsable file must not fail silently
-                        match Config::from_config_file(&path) {
-                            Ok(config) => return config,
-                            Err(e) => {
-                                eprintln!(
-                                    "Ignoring invalid config file '{}': {}",
-                                    path.display(),
-                                    e
-                                );
-                            },
-                        }
+                let path = get_config_location(&home, config_home.as_deref());
+                if path.exists() {
+                    // Same warning as an explicit --config: a present but
+                    // unparsable file must not fail silently
+                    match Config::from_config_file(&path) {
+                        Ok(config) => return config,
+                        Err(e) => {
+                            eprintln!("Ignoring invalid config file '{}': {}", path.display(), e);
+                        },
                     }
                 }
             }
@@ -379,18 +374,18 @@ mod tests {
     use super::*;
 
     #[test]
-    fn config_locations_use_xdg_config_home() {
+    fn config_location_uses_xdg_config_home() {
         let home = PathBuf::from("/home/test");
         let config_home = PathBuf::from("/tmp/config");
 
-        assert_eq!(get_config_locations(&home, Some(&config_home)), vec![
-            home.join(".zdu.toml"),
+        assert_eq!(
+            get_config_location(&home, Some(&config_home)),
             PathBuf::from("/tmp/config/zdu/config.toml"),
-        ]);
-        assert_eq!(get_config_locations(&home, None), vec![
-            home.join(".zdu.toml"),
+        );
+        assert_eq!(
+            get_config_location(&home, None),
             home.join(".config/zdu/config.toml"),
-        ]);
+        );
     }
 
     #[test]

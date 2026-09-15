@@ -23,26 +23,38 @@ fn packaging_verify() -> bool {
 }
 
 fn main() -> Result<(), Error> {
-    let (outdir, man_dir): (PathBuf, PathBuf) = if packaging_verify() {
-        let out = PathBuf::from(env::var_os("OUT_DIR").expect("OUT_DIR is set for build scripts"));
-        (out.join("completions"), out.join("man-page"))
+    // Generated assets use the same relative layout as their Linux install
+    // locations (relative to a prefix like /usr or /usr/local), so the release
+    // archive can be extracted directly into a prefix.
+    // PowerShell has no standard install dir; it follows the share/ layout for
+    // consistency anyway.
+    let root: PathBuf = if packaging_verify() {
+        PathBuf::from(env::var_os("OUT_DIR").expect("OUT_DIR is set for build scripts"))
     } else {
-        ("completions".into(), "man-page".into())
+        ".".into()
     };
-    fs::create_dir_all(&outdir)?;
+    let man_dir = root.join("share/man/man1");
+    let bash_dir = root.join("share/bash-completion/completions");
+    let zsh_dir = root.join("share/zsh/site-functions");
+    let fish_dir = root.join("share/fish/vendor_completions.d");
+    let elvish_dir = root.join("share/elvish/lib");
+    let ps_dir = root.join("share/powershell/completions");
+    for dir in [&man_dir, &bash_dir, &zsh_dir, &fish_dir, &elvish_dir, &ps_dir] {
+        fs::create_dir_all(dir)?;
+    }
+
     let app_name = "zdu";
     let mut cmd = Cli::command();
 
-    generate_to(Bash, &mut cmd, app_name, &outdir)?;
-    generate_to(Zsh, &mut cmd, app_name, &outdir)?;
-    generate_to(Fish, &mut cmd, app_name, &outdir)?;
-    generate_to(PowerShell, &mut cmd, app_name, &outdir)?;
-    generate_to(Elvish, &mut cmd, app_name, &outdir)?;
+    generate_to(Bash, &mut cmd, app_name, &bash_dir)?;
+    // bash-completion expects the file named after the command, without an extension
+    fs::rename(bash_dir.join("zdu.bash"), bash_dir.join(app_name))?;
+    generate_to(Zsh, &mut cmd, app_name, &zsh_dir)?;
+    generate_to(Fish, &mut cmd, app_name, &fish_dir)?;
+    generate_to(Elvish, &mut cmd, app_name, &elvish_dir)?;
+    generate_to(PowerShell, &mut cmd, app_name, &ps_dir)?;
 
-    let file = man_dir.join("zdu.1");
-    fs::create_dir_all(&man_dir)?;
-    let mut file = File::create(file)?;
-
+    let mut file = File::create(man_dir.join("zdu.1"))?;
     Man::new(cmd).render(&mut file)?;
 
     Ok(())

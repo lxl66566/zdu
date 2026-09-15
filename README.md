@@ -34,7 +34,7 @@ Yet another fast, parallel `du` — the ease of use of [dust](https://github.com
 - `-x` stay on one filesystem, `-s` apparent size, `-f` count files, `-m` show file times
 - `-j` JSON output, `--files-from` / `--files0-from` path lists
 - Regex / file-type / min-size / time filters
-- Config file (`~/.zdu.toml`) for defaults
+- Config file (`~/.config/zdu/config.toml`) for defaults
 
 ## Install
 
