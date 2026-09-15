@@ -10,7 +10,7 @@ use std::{
     },
 };
 
-use rayon::iter::{IntoParallelIterator, ParallelIterator};
+use rayon::iter::{IndexedParallelIterator, IntoParallelIterator, ParallelIterator};
 use regex::Regex;
 
 use crate::{
@@ -426,6 +426,7 @@ fn walk_dir<'scope>(
 
             let file_nodes: Vec<Node> = collected
                 .into_par_iter()
+                .with_min_len(MIN_PAR_ENTRIES)
                 .filter_map(|r| match r {
                     Ok(entry) => process_entry(
                         scope,
@@ -630,6 +631,16 @@ fn is_retryable(failed: &Error) -> bool {
 // Some network/virtual filesystems return Interrupted forever; without a cap
 // the walk would spin indefinitely (upstream v1.2.5 gives up after 999)
 const MAX_EINTR_RETRIES: u32 = 999;
+
+// PERF-9: rayon's default split goes down to single elements (~9 entries
+// per directory on /nix/store = 1.36M splits, mostly steal/wake overhead).
+// Clamping the leaf size keeps small dirs on one thread while large ones
+// still split. 16/32/64 measured within noise; 64 marginally best.
+// Chunked readdir streaming was considered and rejected: the whole-Vec
+// collect is load-bearing for EINTR retry atomicity (a retry re-lists from
+// scratch, so partially committed chunks would double-count), and ReadDir
+// cannot seek past already-consumed entries.
+const MIN_PAR_ENTRIES: usize = 64;
 
 fn record_error(failed: &Error, dir: &Path, walk_data: &WalkData) {
     let mut editable_error = walk_data.errors.lock().unwrap();
