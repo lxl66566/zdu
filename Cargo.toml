@@ -60,11 +60,6 @@ portable-atomic = "1.4"
 filesize    = "0.2.0"
 winapi-util = "0.1"
 
-[lints.cargo]
-# keep explicit readme/homepage for crates.io metadata clarity
-manual_readme      = "allow"
-redundant_homepage = "allow"
-
 [lints.clippy]
 all                     = { level = "warn", priority = -1 }
 cargo                   = { level = "warn", priority = -1 }

@@ -97,7 +97,10 @@ const INODE_SHARDS: usize = 256;
 // inserts into a single mutex and recreates a global lock (measured: 818ms
 // vs 631ms wall on /nix/store from futex wake storms alone).
 fn inode_shard(id: (u64, u64)) -> usize {
-    (id.0.wrapping_mul(0x9E37_79B9_7F4A_7C15) % INODE_SHARDS as u64) as usize
+    // The modulo bounds the result to < INODE_SHARDS (256), so try_from
+    // cannot fail even on 32-bit targets.
+    usize::try_from(id.0.wrapping_mul(0x9e37_79b9_7f4a_7c15) % INODE_SHARDS as u64)
+        .expect("shard index is < INODE_SHARDS")
 }
 
 struct InodeSet {
@@ -124,7 +127,7 @@ impl InodeSet {
 // hardlink. Under apparent size (-p) every link counts, so nothing is
 // claimed. Called after the ignore checks so filtered entries never claim.
 fn is_duplicate_inode(
-    metadata: &Option<EntryMetadata>,
+    metadata: Option<&EntryMetadata>,
     walk_data: &WalkData,
     inodes: &InodeSet,
 ) -> bool {
@@ -199,7 +202,7 @@ fn walk_root(
     // so a duplicate root skips its whole subtree, matching the old post-walk
     // clean_inodes drop of the finished root node. Computed before the
     // metadata is moved into the PendingDir.
-    let root_is_dup = is_duplicate_inode(&root_metadata, walk_data, inodes);
+    let root_is_dup = is_duplicate_inode(root_metadata.as_ref(), walk_data, inodes);
 
     let root = Arc::new(PendingDir {
         dir: d,
@@ -488,7 +491,7 @@ fn process_entry<'scope>(
     // post-walk pass). First-seen wins; which link wins is already
     // nondeterministic across parallel directories. Applies to directories
     // too: a dup skips the whole subtree, like the old post-walk drop did.
-    if is_duplicate_inode(&metadata, walk_data, inodes) {
+    if is_duplicate_inode(metadata.as_ref(), walk_data, inodes) {
         return None;
     }
 
@@ -883,13 +886,13 @@ mod tests {
 
         let tmp = tempfile::tempdir().unwrap();
         let locked = tmp.path().join("locked");
-        std::fs::create_dir(&locked).unwrap();
-        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o000)).unwrap();
+        fs::create_dir(&locked).unwrap();
+        fs::set_permissions(&locked, fs::Permissions::from_mode(0o000)).unwrap();
 
         // Probe: if we can still list it, we're effectively root (or the FS
         // ignores mode bits) and the test can't observe a PermissionDenied.
-        if std::fs::read_dir(&locked).is_ok() {
-            std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755)).unwrap();
+        if fs::read_dir(&locked).is_ok() {
+            fs::set_permissions(&locked, fs::Permissions::from_mode(0o755)).unwrap();
             return;
         }
 
@@ -900,7 +903,7 @@ mod tests {
         let _ = walk_it(roots, &walkdata);
 
         // Restore permissions before tempdir's Drop tries to clean up.
-        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755)).unwrap();
+        fs::set_permissions(&locked, fs::Permissions::from_mode(0o755)).unwrap();
 
         let errors = walkdata.errors.lock().unwrap();
         assert!(

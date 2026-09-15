@@ -133,7 +133,10 @@ mod tests {
             fmt.replace(JsonSizeFormat::Count);
         });
         let json = serde_json::to_string(&tree).unwrap();
-        assert_eq!(json, r#"{"size":3758096384,"name":"/a","children":[{"size":4096,"name":"/a/b","children":[]}]}"#);
+        assert_eq!(
+            json,
+            r#"{"size":3758096384,"name":"/a","children":[{"size":4096,"name":"/a/b","children":[]}]}"#
+        );
 
         // restore the thread-local default for other tests
         OUTPUT_TYPE.with(|fmt| {
