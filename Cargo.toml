@@ -1,16 +1,16 @@
 [package]
-name         = "zdu"
+name         = "zdu-rs"
 version      = "0.1.0"
 edition      = "2024"
 rust-version = "1.85"
-description  = "A more intuitive version of du (port of du-dust)"
+description  = "A fast disk usage analyzer, competitive with dust and pdu."
 readme       = "README.md"
 homepage     = "https://github.com/lxl66566/zdu"
 repository   = "https://github.com/lxl66566/zdu"
 license      = "MIT OR Apache-2.0"
 keywords     = ["command-line", "disk", "disk-usage", "du"]
 categories   = ["command-line-utilities"]
-include = [
+include      = [
   "/LICENSE-*",
   "/README.md",
   "/build.rs",
