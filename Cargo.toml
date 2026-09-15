@@ -10,11 +10,9 @@ repository   = "https://github.com/lxl66566/zdu"
 license      = "MIT OR Apache-2.0"
 keywords     = ["command-line", "disk", "disk-usage", "du"]
 categories   = ["command-line-utilities"]
-include      = [
-  "/CHANGELOG.md",
+include = [
   "/LICENSE-*",
   "/README.md",
-  "/benches/**",
   "/build.rs",
   "/src/**",
   "/tests/**",
