@@ -228,9 +228,7 @@ pub fn draw_it(
 }
 
 fn find_biggest_size_str(node: &DisplayNode, output_format: &str) -> usize {
-    let mut mx = human_readable_number(node.size, output_format)
-        .chars()
-        .count();
+    let mut mx = human_readable_len(node.size, output_format);
     for n in &node.children {
         mx = max(mx, find_biggest_size_str(n, output_format));
     }
@@ -510,37 +508,89 @@ pub fn get_number_format(output_str: &str) -> Option<(u64, &'static str)> {
     None
 }
 
-pub fn human_readable_number(size: u64, output_str: &str) -> String {
+// Numeric core of human_readable_number, shared with the column-width
+// computation (PERF-3) so the two can never drift apart. Note that the
+// rendered width is NOT monotonic in size (1023 -> "1023B" is 5 cols but
+// 10240 -> "10Ki" is 4), which is why the width cannot be derived from
+// max(size) alone: every node must be measured numerically (zero-alloc).
+struct HumanSize {
+    integer: u64,
+    /// single fractional digit (0-9), shown after a '.'
+    decimal: Option<u64>,
+    unit: &'static str,
+}
+
+fn human_size_parts(size: u64, output_str: &str) -> HumanSize {
     if output_str == "count" {
-        return size.to_string();
+        return HumanSize {
+            integer: size,
+            decimal: None,
+            unit: "",
+        };
     }
     if let Some((x, u)) = get_number_format(output_str) {
-        format!("{}{}", (size / x), u)
-    } else {
-        let units = get_units(output_str);
-        let thousand = get_type_of_thousand(output_str);
-        for (i, u) in units.iter().enumerate() {
-            let marker = thousand.pow((units.len() - i) as u32);
-            if size >= marker {
-                // Integer rounding in u128 (pdu BUG-8): f32's 24-bit mantissa
-                // loses precision above ~16.7MB, and `{:.1}` can carry into
-                // "10.0X"-style output at unit boundaries.
-                let mut tenths =
-                    ((u128::from(size) * 10 + u128::from(marker) / 2) / u128::from(marker)) as u64;
-                let mut unit = u;
-                // rounding carried up to the next unit (e.g. 1023.999Ki -> 1.0Mi)
-                if i > 0 && tenths >= 10 * thousand {
-                    tenths /= thousand;
-                    unit = &units[i - 1];
-                }
-                if tenths < 100 {
-                    return format!("{}.{}{}", tenths / 10, tenths % 10, unit);
-                }
-                return format!("{}{}", tenths / 10, unit);
-            }
-        }
-        format!("{size}B")
+        return HumanSize {
+            integer: size / x,
+            decimal: None,
+            unit: u,
+        };
     }
+    let units = get_units(output_str);
+    let thousand = get_type_of_thousand(output_str);
+    for (i, u) in units.iter().enumerate() {
+        let marker = thousand.pow((units.len() - i) as u32);
+        if size >= marker {
+            // Integer rounding in u128 (pdu BUG-8): f32's 24-bit mantissa
+            // loses precision above ~16.7MB, and `{:.1}` can carry into
+            // "10.0X"-style output at unit boundaries.
+            let mut tenths =
+                ((u128::from(size) * 10 + u128::from(marker) / 2) / u128::from(marker)) as u64;
+            let mut unit = u;
+            // rounding carried up to the next unit (e.g. 1023.999Ki -> 1.0Mi)
+            if i > 0 && tenths >= 10 * thousand {
+                tenths /= thousand;
+                unit = &units[i - 1];
+            }
+            if tenths < 100 {
+                return HumanSize {
+                    integer: tenths / 10,
+                    decimal: Some(tenths % 10),
+                    unit,
+                };
+            }
+            return HumanSize {
+                integer: tenths / 10,
+                decimal: None,
+                unit,
+            };
+        }
+    }
+    HumanSize {
+        integer: size,
+        decimal: None,
+        unit: "B",
+    }
+}
+
+pub fn human_readable_number(size: u64, output_str: &str) -> String {
+    let parts = human_size_parts(size, output_str);
+    match parts.decimal {
+        Some(d) => format!("{}.{}{}", parts.integer, d, parts.unit),
+        None => format!("{}{}", parts.integer, parts.unit),
+    }
+}
+
+// PERF-3: rendered width of human_readable_number without formatting.
+// All digits and units are ASCII, so byte length == char count.
+fn human_readable_len(size: u64, output_str: &str) -> usize {
+    let parts = human_size_parts(size, output_str);
+    decimal_digit_count(parts.integer)
+        + parts.decimal.map_or(0, |_| 2) // '.' plus one digit
+        + parts.unit.len()
+}
+
+fn decimal_digit_count(n: u64) -> usize {
+    n.checked_ilog10().map_or(1, |e| e as usize + 1)
 }
 
 mod tests {
@@ -752,6 +802,45 @@ mod tests {
         // rounding inside the <10 window stays one decimal
         assert_eq!(hrn(1024 + 512, ""), "1.5Ki");
         assert_eq!(hrn(9 * 1024 + 511, ""), "9.5Ki");
+    }
+
+    // PERF-3: human_readable_len must equal the rendered string length for
+    // every size/format pair; the width drives the size column alignment
+    #[test]
+    fn test_human_readable_len_matches_rendered_length() {
+        let formats = ["", "si", "b", "kb", "k", "kib", "mib", "gib", "count"];
+        // boundary values around every unit edge, plus the promotion edges
+        let mut sizes: Vec<u64> = vec![0, 1, 9, 10, 99, 100, 999, 1000, 1001, 1023, 1024, 1025];
+        for &base in &[1000_u64, 1024] {
+            for &mult in &[1, 2, 9, 10, 99, 100, 512, 999, 1000] {
+                for &delta in &[0_u64, 1, 2, 47, 511, 512, 513] {
+                    sizes.push(base * mult + delta);
+                    sizes.push(base * mult - delta.min(base * mult));
+                }
+            }
+            sizes.push(u64::MAX / base * base);
+        }
+        sizes.push(u64::MAX);
+        sizes.push(u64::MAX - 1);
+        sizes.push(10_u64.pow(18) - 1);
+        sizes.push(10_u64.pow(18));
+        sizes.push(1 << 60);
+        sizes.dedup();
+        for fmt in formats {
+            for &size in &sizes {
+                assert_eq!(
+                    human_readable_len(size, fmt),
+                    human_readable_number(size, fmt).chars().count(),
+                    "size {size} fmt {fmt:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_human_readable_len_non_monotonic_width_case() {
+        // documents why width cannot be derived from max(size) alone
+        assert!(human_readable_len(1023, "") > human_readable_len(10240, ""));
     }
 
     // Refer to https://en.wikipedia.org/wiki/Byte#Multiple-byte_units
