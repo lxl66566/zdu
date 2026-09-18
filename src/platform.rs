@@ -48,7 +48,10 @@ pub fn get_metadata<P: AsRef<Path>>(
                 // To avoid overestimating disk usage, cap the allocated size to what the
                 // file should occupy based on the file system I/O block size (blksize).
                 // Related: https://github.com/bootandy/dust/issues/295
-                let blksize = md.blksize();
+                // BUG-16: a few FUSE/virtual filesystems report
+                // st_blksize == 0; div_ceil by zero panicked in a rayon
+                // worker and poisoned the shared error-sink mutexes.
+                let blksize = md.blksize().max(1);
                 let target_size = file_size.div_ceil(blksize) * blksize;
                 let reported_size = md.blocks() * get_block_size();
 
