@@ -89,7 +89,11 @@ fn build_by_all_file_types<'a>(
     counter: &mut HashMap<Option<&'a OsStr>, u64>,
     by_filetime: Option<&FileTime>,
 ) {
-    for node in top_level_nodes {
+    // PERF-7: explicit stack, mirroring the iterative walker (deep trees
+    // must not overflow the render/aggregation side either). Aggregation is
+    // order-independent (max/sum), so the traversal order change is safe.
+    let mut stack: Vec<&Node> = top_level_nodes.iter().collect();
+    while let Some(node) = stack.pop() {
         // PERF-3: is_file recorded during the walk; no per-node stat here
         if node.is_file {
             let ext = node.name.extension();
@@ -101,7 +105,7 @@ fn build_by_all_file_types<'a>(
                 *cumulative_size += node.size;
             }
         }
-        build_by_all_file_types(&node.children, counter, by_filetime);
+        stack.extend(node.children.iter());
     }
 }
 

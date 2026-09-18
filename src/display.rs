@@ -222,18 +222,23 @@ pub fn draw_it(
         {
             let is_biggest = display_data.is_biggest(count, root_node.num_siblings());
             let was_i_last = display_data.is_last(count, root_node.num_siblings());
-            display_node(c, &mut draw_data, &mut out, is_biggest, was_i_last, 0);
+            display_node(c, &mut draw_data, &mut out, is_biggest, was_i_last);
         }
     } else {
-        display_node(root_node, &mut draw_data, &mut out, true, true, 0);
+        display_node(root_node, &mut draw_data, &mut out, true, true);
     }
     out.flush().unwrap();
 }
 
 fn find_biggest_size_str(node: &DisplayNode, output_format: &str) -> usize {
+    // PERF-7: explicit stack; see display_node
     let mut mx = human_readable_len(node.size, output_format);
-    for n in &node.children {
-        mx = max(mx, find_biggest_size_str(n, output_format));
+    let mut stack = vec![node];
+    while let Some(n) = stack.pop() {
+        for c in &n.children {
+            mx = max(mx, human_readable_len(c.size, output_format));
+            stack.push(c);
+        }
     }
     mx
 }
@@ -244,22 +249,47 @@ fn find_longest_dir_name(
     terminal: usize,
     idd: &InitialDisplayData,
 ) -> usize {
-    let printable_name = get_printable_name(&node.name, idd.short_paths);
+    let mut longest = 0;
+    // PERF-7: explicit stack; see display_node
+    let mut stack = vec![(node, indent)];
+    while let Some((n, indent)) = stack.pop() {
+        let printable_name = get_printable_name(&n.name, idd.short_paths);
 
-    let longest = if idd.is_screen_reader {
-        UnicodeWidthStr::width(&*printable_name) + 1
-    } else {
-        min(
-            UnicodeWidthStr::width(&*printable_name) + 1 + indent,
-            terminal,
-        )
-    };
+        let current = if idd.is_screen_reader {
+            UnicodeWidthStr::width(&*printable_name) + 1
+        } else {
+            min(
+                UnicodeWidthStr::width(&*printable_name) + 1 + indent,
+                terminal,
+            )
+        };
+        longest = max(longest, current);
 
-    // each none root tree drawing is 2 more chars, hence we increment indent by 2
-    node.children
-        .iter()
-        .map(|c| find_longest_dir_name(c, indent + 2, terminal, idd))
-        .fold(longest, max)
+        // each none root tree drawing is 2 more chars, hence we increment indent by 2
+        for c in &n.children {
+            stack.push((c, indent + 2));
+        }
+    }
+    longest
+}
+
+// PERF-7: explicit stack instead of recursion, mirroring the iterative
+// walker (which has a 500-level test): rendering a deep tree must not be the
+// remaining stack-overflow hazard. Deferred lines (is_reversed prints a node
+// after its children) live in the Exit frame until the subtree is done.
+enum Frame<'a> {
+    Enter {
+        node: &'a DisplayNode,
+        is_biggest: bool,
+        is_last: bool,
+        depth: usize,
+    },
+    Exit {
+        // Some(..) in reversed mode: the line still needs printing
+        to_print: Option<String>,
+        indent_start: usize,
+        parent_bar: String,
+    },
 }
 
 fn display_node<W: Write>(
@@ -268,51 +298,89 @@ fn display_node<W: Write>(
     out: &mut W,
     is_biggest: bool,
     is_last: bool,
-    depth: usize,
 ) {
-    let has_children = !node.children.is_empty();
-    // PERF-2: push this node's 3-char tree group onto the shared indent
-    // buffer instead of cloning the whole prefix per level; children get the
-    // 2-column cleaned continuation, restored on the way back up
-    let indent_start = draw_data.indent.len();
-    let tree_chars = draw_data.display_data.get_tree_chars(is_last, has_children);
-    draw_data.indent.push_str(tree_chars);
-    // depth == level: the old form was ((indent.chars().count() - 1) / 2) - 1
-    // with indent = 2*depth cleaned columns + the 3-char group
-    let bar_text = draw_data.generate_bar(node, depth);
-
-    let to_print = format_string(
+    let is_reversed = draw_data.display_data.initial.is_reversed;
+    let mut stack = vec![Frame::Enter {
         node,
-        &draw_data.indent,
-        &bar_text,
         is_biggest,
-        draw_data.display_data,
-    );
+        is_last,
+        depth: 0,
+    }];
 
-    if !draw_data.display_data.initial.is_reversed {
-        writeln!(out, "{to_print}").unwrap();
-    }
+    while let Some(frame) = stack.pop() {
+        match frame {
+            Frame::Enter {
+                node,
+                is_biggest,
+                is_last,
+                depth,
+            } => {
+                let has_children = !node.children.is_empty();
+                // PERF-2: push this node's 3-char tree group onto the shared
+                // indent buffer instead of cloning the whole prefix per
+                // level; children get the 2-column cleaned continuation,
+                // restored by the Exit frame on the way back up
+                let indent_start = draw_data.indent.len();
+                let tree_chars = draw_data.display_data.get_tree_chars(is_last, has_children);
+                draw_data.indent.push_str(tree_chars);
+                // depth == level: the pre-PERF-2 form was
+                // ((indent.chars().count() - 1) / 2) - 1 with indent =
+                // 2*depth cleaned columns + the 3-char group
+                let bar_text = draw_data.generate_bar(node, depth);
 
-    draw_data.indent.truncate(indent_start);
-    draw_data.indent.push_str(clean_tree_group(tree_chars));
-    let parent_bar = std::mem::replace(&mut draw_data.percent_bar, bar_text);
+                let to_print = format_string(
+                    node,
+                    &draw_data.indent,
+                    &bar_text,
+                    is_biggest,
+                    draw_data.display_data,
+                );
 
-    let num_siblings = node.num_siblings();
+                if !is_reversed {
+                    writeln!(out, "{to_print}").unwrap();
+                }
 
-    for (count, c) in node
-        .get_children_from_node(draw_data.display_data.initial.is_reversed)
-        .enumerate()
-    {
-        let is_biggest = draw_data.display_data.is_biggest(count, num_siblings);
-        let was_i_last = draw_data.display_data.is_last(count, num_siblings);
-        display_node(c, draw_data, out, is_biggest, was_i_last, depth + 1);
-    }
+                draw_data.indent.truncate(indent_start);
+                draw_data.indent.push_str(clean_tree_group(tree_chars));
+                let parent_bar = std::mem::replace(&mut draw_data.percent_bar, bar_text);
 
-    draw_data.indent.truncate(indent_start);
-    draw_data.percent_bar = parent_bar;
+                stack.push(Frame::Exit {
+                    to_print: is_reversed.then_some(to_print),
+                    indent_start,
+                    parent_bar,
+                });
 
-    if draw_data.display_data.initial.is_reversed {
-        writeln!(out, "{to_print}").unwrap();
+                let num_siblings = node.num_siblings();
+                // Children must be visited in the same order the recursion
+                // used (reversed = last child first); the stack is LIFO, so
+                // push them in reverse visit order with their pre-computed
+                // is_biggest/is_last flags.
+                for count in (0..node.children.len()).rev() {
+                    let child = if is_reversed {
+                        &node.children[node.children.len() - 1 - count]
+                    } else {
+                        &node.children[count]
+                    };
+                    stack.push(Frame::Enter {
+                        node: child,
+                        is_biggest: draw_data.display_data.is_biggest(count, num_siblings),
+                        is_last: draw_data.display_data.is_last(count, num_siblings),
+                        depth: depth + 1,
+                    });
+                }
+            },
+            Frame::Exit {
+                to_print,
+                indent_start,
+                parent_bar,
+            } => {
+                draw_data.indent.truncate(indent_start);
+                draw_data.percent_bar = parent_bar;
+                if let Some(to_print) = to_print {
+                    writeln!(out, "{to_print}").unwrap();
+                }
+            },
+        }
     }
 }
 
@@ -769,6 +837,42 @@ mod tests {
         draw_it(idd.clone(), &node, false, 12, false);
         // Width too narrow even for the size column: clean early return
         draw_it(idd, &node, false, 5, false);
+    }
+
+    // PERF-7 regression: render/aggregation traversals must not recurse
+    // (the walker is iterative with a 500-level test; rendering must not be
+    // the remaining stack-overflow hazard). 5000 levels overflowed the
+    // default stack as recursion in debug builds.
+    #[test]
+    fn test_draw_it_very_deep_tree_no_stack_overflow() {
+        let mut node = DisplayNode {
+            name: PathBuf::from("leaf"),
+            size: 1,
+            children: vec![],
+            is_file: true,
+        };
+        for i in 0..5000 {
+            node = DisplayNode {
+                name: PathBuf::from(format!("d{i}")),
+                size: 2,
+                children: vec![node],
+                is_file: false,
+            };
+        }
+        for is_reversed in [false, true] {
+            let idd = InitialDisplayData {
+                short_paths: false,
+                is_reversed,
+                colors_on: false,
+                dim: false,
+                by_filecount: false,
+                by_filetime: None,
+                is_screen_reader: false,
+                output_format: String::new(),
+                bars_on_right: false,
+            };
+            draw_it(idd, &node, true, 200, false);
+        }
     }
 
     #[test]
