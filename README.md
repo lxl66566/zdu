@@ -64,24 +64,38 @@ zdu --files-from list.txt  # scan paths from a file
 
 ## Benchmark
 
-Measured with [hyperfine](https://github.com/sharkdp/hyperfine) on Linux (32 cores, warm page cache, output redirected to `/dev/null`), against dust 1.2.4 and pdu 0.21.1. pdu runs with `-H` (`--deduplicate-hardlinks`) so all three tools deduplicate hard links the same way zdu and dust do by default:
+Measured with [hyperfine](https://github.com/sharkdp/hyperfine) (warm page cache, 32 logical cores on both machines). Each tool runs several rounds with rotated order.
+
+### Linux (dust 1.2.4, pdu 0.21.1)
+
+pdu runs with `-H` (`--deduplicate-hardlinks`) so all three tools deduplicate hard links the same way zdu and dust do by default:
 
 | Tree                      | zdu      | dust     | pdu `-H` | zdu vs dust      | zdu vs pdu      |
 | ------------------------- | -------- | -------- | -------- | ---------------- | --------------- |
-| `~/.cargo` (57k files)    | 20.6 ms  | 222.8 ms | 14.3 ms  | **10.8x faster** | 1.44x slower    |
-| `~/programs` (482k files) | 141.2 ms | 393.9 ms | 218.9 ms | **2.8x faster**  | **1.6x faster** |
-| `/nix/store` (900k files) | 309.5 ms | 940.1 ms | 1.088 s  | **3.0x faster**  | **3.5x faster** |
+| `~/.cargo` (57k files)    | 19.6 ms  | 202.2 ms | 14.0 ms  | **10.3x faster** | 1.40x slower    |
+| `~/programs` (509k files) | 143.8 ms | 388.2 ms | 228.3 ms | **2.7x faster**  | **1.6x faster** |
+| `/nix/store` (1.2M files) | 402.7 ms | 1.118 s  | 1.401 s  | **2.8x faster**  | **3.5x faster** |
 
-zdu renders a full tree chart (like dust) while pdu prints a flat sorted list, so zdu does strictly more output work per run; pdu's hard-link dedup scales poorly on link-heavy trees (`/nix/store`), where zdu pulls ahead by 3.5x.
+### Windows 10 / NTFS (dust 1.2.3, pdu 0.24.0)
+
+pdu's `-H` is unsupported on Windows (`UnsupportedFeature`), so all three tools count every link on plain entries:
+
+| Tree                        | zdu      | dust     | pdu      | zdu vs dust     | zdu vs pdu      |
+| --------------------------- | -------- | -------- | -------- | --------------- | --------------- |
+| zdu build tree (7.6k files) | 22.7 ms  | 60.4 ms  | 46.3 ms  | **2.7x faster** | **2.0x faster** |
+| `System32` (21k files)      | 38.6 ms  | 171.3 ms | 114.6 ms | **4.4x faster** | **3.0x faster** |
+| `~/.cargo` (163k files)     | 389.3 ms | 2.886 s  | 2.396 s  | **7.4x faster** | **6.2x faster** |
+
+zdu renders a full tree chart (like dust) while pdu prints a flat sorted list, so zdu does strictly more output work per run. On Linux, pdu's flat walk wins on the small tree but its hard-link dedup scales poorly on link-heavy trees (`/nix/store`), where zdu pulls ahead by 3.5x; on Windows zdu leads on every tree.
 
 ## Differences vs dust / pdu
 
-|                         | dust       | pdu                 | zdu                                               |
-| ----------------------- | ---------- | ------------------- | ------------------------------------------------- |
-| Output                  | tree chart | flat/sorted list    | tree chart (dust-style)                           |
-| Walker                  | parallel   | parallel, lock-free | parallel (rayon), no recursion                    |
+|                         | dust       | pdu                 | zdu                                                                 |
+| ----------------------- | ---------- | ------------------- | ------------------------------------------------------------------- |
+| Output                  | tree chart | flat/sorted list    | tree chart (dust-style)                                             |
+| Walker                  | parallel   | parallel, lock-free | parallel (rayon), no recursion                                      |
 | Windows stat per entry  | yes        | yes                 | none for plain entries (`DirEntry::metadata()` reuses readdir data) |
-| `-j` on non-UTF-8 names | panic      | —                   | lossy, never panics                               |
+| `-j` on non-UTF-8 names | panic      | —                   | lossy, never panics                                                 |
 
 zdu started as a port of dust v1.2.5 with multiple bugs fixed, then adopted pdu's performance lessons.
 
