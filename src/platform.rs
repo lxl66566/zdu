@@ -168,12 +168,17 @@ fn get_metadata_expensive(
     use winapi_util::{Handle, file::information};
 
     const FILE_READ_ATTRIBUTES: u32 = 0x0080;
+    const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x0200_0000;
 
     // Opening with the full GENERIC_READ is the expensive part (defender
     // scans); FILE_READ_ATTRIBUTES alone is cheap
     // https://docs.microsoft.com/en-us/windows/win32/secauthz/generic-access-rights
+    // FILE_FLAG_BACKUP_SEMANTICS is required to open directories (junction
+    // targets included) and costs nothing extra; without it the expensive
+    // path could never serve one (CreateFileW fails with access denied).
     let file = OpenOptions::new()
         .access_mode(FILE_READ_ATTRIBUTES)
+        .custom_flags(FILE_FLAG_BACKUP_SEMANTICS)
         .open(path)
         .ok()?;
     let h = Handle::from_file(file);
@@ -210,12 +215,15 @@ pub fn get_metadata<P: AsRef<Path>>(
     follow_links: bool,
 ) -> Option<(u64, Option<InodeAndDevice>, FileTime)> {
     let path = path.as_ref();
-    let metadata = if follow_links {
-        path.metadata()
-    } else {
-        path.symlink_metadata()
-    };
-    metadata
+    if follow_links {
+        // Followed links need the target's file id for -L cycle detection and
+        // the -x device filter; the fast path returns none. Without this the
+        // walker's id lookup silently dropped every followed link whose
+        // target was a plain file/dir (BUG-1). Symlinks are rare, so the
+        // extra open per link is negligible.
+        return get_metadata_expensive(path, use_apparent_size);
+    }
+    path.symlink_metadata()
         .ok()
         .and_then(|md| metadata_from(&md, path, use_apparent_size))
         .or_else(|| get_metadata_expensive(path, use_apparent_size))

@@ -504,14 +504,21 @@ fn process_entry<'scope>(
             // 2. the -x device check: the cheap Windows metadata path returns no device for
             //    directories, so a junction to another volume would otherwise slip past
             //    `allowed_filesystems`
-            let id = metadata.as_ref().and_then(|(_, id, _)| *id)?;
-            if !walk_data.allowed_filesystems.is_empty()
-                && !walk_data.allowed_filesystems.contains(&id.1)
-            {
-                return None;
-            }
-            if !pending.followed_dir_ids.lock().unwrap().insert(id) {
-                return None;
+            // A missing id must NOT drop the entry (BUG-1: it used to turn
+            // "no id" into "entry gone"); per du semantics we would rather
+            // walk it without dedup than silently lose it. On Windows
+            // followed links always take the expensive metadata path, so
+            // id=None here means the target's identity is unavailable at all
+            // (e.g. dangling link) and walk_dir will record the failure.
+            if let Some(id) = metadata.as_ref().and_then(|(_, id, _)| *id) {
+                if !walk_data.allowed_filesystems.is_empty()
+                    && !walk_data.allowed_filesystems.contains(&id.1)
+                {
+                    return None;
+                }
+                if !pending.followed_dir_ids.lock().unwrap().insert(id) {
+                    return None;
+                }
             }
         }
 

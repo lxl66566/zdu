@@ -224,3 +224,56 @@ pub fn test_junction_loop_with_dereference() {
         "loop ran past path limits: {stderr}"
     );
 }
+
+// BUG-1 regression: under -L a junction to a plain directory used to vanish
+// entirely. The cheap Windows metadata path returns no file id, and the
+// walker treated the missing id as "drop the entry".
+#[cfg(target_os = "windows")]
+#[test]
+pub fn test_junction_dereference_shows_target_content() {
+    use std::process::Command as OsCommand;
+
+    let dir = Builder::new().tempdir().unwrap();
+
+    let target = dir.path().join("jt");
+    std::fs::create_dir(&target).unwrap();
+    std::fs::write(target.join("f.txt"), b"123456789").unwrap();
+
+    let junction = dir.path().join("jlink");
+    let status = OsCommand::new("cmd")
+        .args([
+            "/c",
+            "mklink",
+            "/J",
+            junction.to_str().unwrap(),
+            target.to_str().unwrap(),
+        ])
+        .status()
+        .unwrap();
+    assert!(status.success(), "mklink /J failed");
+
+    let mut cmd = cargo_bin_cmd!("zdu");
+    let output = cmd
+        .args([
+            "-L",
+            "-p",
+            "-c",
+            "-s",
+            "-w",
+            "999",
+            "-d",
+            "2",
+            dir.path().to_str().unwrap(),
+        ])
+        .unwrap();
+    assert!(output.status.success());
+    let stdout = str::from_utf8(&output.stdout).unwrap();
+
+    // Both the real dir and the followed junction must expose f.txt.
+    // stfu8 escapes path separators in the tree output, hence the doubled \.
+    assert!(stdout.contains("jt\\\\f.txt"), "target content missing: {stdout}");
+    assert!(
+        stdout.contains("jlink\\\\f.txt"),
+        "followed junction content missing: {stdout}"
+    );
+}
