@@ -424,6 +424,16 @@ fn print_any_errors(print_errors: bool, final_errors: &RuntimeErrors) {
             .join(", ");
         eprintln!("Unknown Error: {err}");
     }
+    if !final_errors.metadata_unavailable.is_empty() {
+        // BUG-13: their subtree was walked but dropped from the totals
+        let err = final_errors
+            .metadata_unavailable
+            .iter()
+            .map(AsRef::as_ref)
+            .collect::<Vec<&str>>()
+            .join(", ");
+        eprintln!("Could not get metadata for (subtrees not counted): {err}");
+    }
 }
 
 fn read_paths_from_source(path: &str, null_terminated: bool) -> Vec<String> {

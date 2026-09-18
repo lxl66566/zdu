@@ -15,6 +15,7 @@ use std::{
 
 #[cfg(not(target_has_atomic = "64"))]
 use portable_atomic::AtomicU64;
+use terminal_size::terminal_size_of;
 
 use crate::display::human_readable_number;
 
@@ -78,6 +79,11 @@ pub struct RuntimeErrors {
     pub no_permissions: HashSet<String>,
     pub file_not_found: HashSet<String>,
     pub unknown_error: HashSet<String>,
+    // BUG-13: entries whose stat failed (e.g. directory renamed/deleted
+    // between readdir and stat). The walker still walks their subtree but
+    // cannot build a Node for them; without this bucket the finished
+    // subtree vanished from the totals with zero indication.
+    pub metadata_unavailable: HashSet<String>,
     pub interrupted_error: i32,
 }
 
@@ -113,6 +119,14 @@ impl PIndicator {
     }
 
     pub fn spawn(&mut self, output_display: String) {
+        // BUG-12: the spinner is interactive UI. When stderr is not a tty
+        // (pipe, file, CI capture) don't write \r-rendered lines into it at
+        // all; stop() is a no-op with no thread. terminal_size_of doubles as
+        // the isatty check (returns None for non-console handles), same
+        // approach as should_init_color uses for stdout.
+        if terminal_size_of(std::io::stderr()).is_none() {
+            return;
+        }
         let data = self.data.clone();
         let (stop_handler, receiver) = mpsc::channel::<()>();
 
@@ -128,7 +142,16 @@ impl PIndicator {
             {
                 // Clear the text written by 'write!'& Return at the start of line
                 let clear = format!("\r{:width$}", " ", width = msg.len());
-                write!(stderr, "{clear}").unwrap();
+                // BUG-12: a failed stderr write (EPIPE, ENOSPC, invalid
+                // handle) must kill the spinner quietly; a panicking thread
+                // here would cascade into stop() and take the result output
+                // with it.
+                if write!(stderr, "{clear}")
+                    .and_then(|()| stderr.flush())
+                    .is_err()
+                {
+                    break;
+                }
                 let prog_char = PROGRESS_CHARS[progress_char_i];
 
                 msg = match data.state.load(ORDERING) {
@@ -137,25 +160,33 @@ impl PIndicator {
                     _ => panic!("Unknown State"),
                 };
 
-                write!(stderr, "\r{msg}").unwrap();
-                stderr.flush().unwrap();
+                if write!(stderr, "\r{msg}")
+                    .and_then(|()| stderr.flush())
+                    .is_err()
+                {
+                    break;
+                }
 
                 progress_char_i += 1;
                 progress_char_i %= PROGRESS_CHARS_LEN;
             }
 
+            // Best-effort cleanup: stderr may already be unusable
             let clear = format!("\r{:width$}", " ", width = msg.len());
-            write!(stderr, "{clear}").unwrap();
-            write!(stderr, "\r").unwrap();
-            stderr.flush().unwrap();
+            let _ = write!(stderr, "{clear}");
+            let _ = write!(stderr, "\r");
+            let _ = stderr.flush();
         });
         self.thread = Some((stop_handler, time_info_thread));
     }
 
     pub fn stop(self) {
         if let Some((stop_handler, thread)) = self.thread {
-            stop_handler.send(()).unwrap();
-            thread.join().unwrap();
+            // The spinner thread may already be gone (stderr write failure
+            // dropped the receiver); losing the results to a panic here
+            // would be far worse than a stray spinner line.
+            let _ = stop_handler.send(());
+            let _ = thread.join();
         }
     }
 }

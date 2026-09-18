@@ -19,7 +19,7 @@ use crate::{
     progress::{ORDERING, Operation, PAtomicInfo, RuntimeErrors},
     utils::{
         is_filtered_out_due_to_file_time, is_filtered_out_due_to_invert_regex,
-        is_filtered_out_due_to_regex,
+        is_filtered_out_due_to_regex, path_set_contains, path_starts_with,
     },
 };
 
@@ -198,6 +198,14 @@ fn walk_root(
         walk_data.use_apparent_size,
         walk_data.follow_links && root_is_symlink,
     );
+    // BUG-11: seed the root's own id so a -L symlink pointing back to the
+    // root itself (a/self -> a) is detected as a loop. Without it the whole
+    // subtree was descended into a second time; only -p runs noticed,
+    // because otherwise the global hardlink dedup happens to claim the
+    // root id first and masks the double walk.
+    if let Some((_, Some(id), _)) = root_metadata.as_ref() {
+        followed_dir_ids.lock().unwrap().insert(*id);
+    }
     // Root dedup (cross-root hardlinks / bind mounts): claim before walking
     // so a duplicate root skips its whole subtree, matching the old post-walk
     // clean_inodes drop of the finished root node. Computed before the
@@ -247,8 +255,10 @@ fn walk_root(
 // canonicalized path of the directory containing `path` (computed once per
 // directory): canonical(child) == canonical_dir + file name, so the absolute
 // check below needs no per-entry canonicalize (PERF-1, ~2x slowdown on -X).
+// BUG-2: all comparisons go through the case-folding helpers so `-X DIR`
+// ignores `dir` on case-insensitive Windows filesystems.
 fn is_ignored_path(path: &Path, canonical_dir: Option<&Path>, walk_data: &WalkData) -> bool {
-    if walk_data.ignore_directories.contains(path) {
+    if path_set_contains(&walk_data.ignore_directories, path) {
         return true;
     }
 
@@ -268,13 +278,13 @@ fn is_ignored_path(path: &Path, canonical_dir: Option<&Path>, walk_data: &WalkDa
         walk_data
             .ignore_directories
             .iter()
-            .any(|ignored| ignored.is_absolute() && dir.join(file_name).starts_with(ignored))
+            .any(|ignored| ignored.is_absolute() && path_starts_with(ignored, &dir.join(file_name)))
     } else {
         let absolute_entry_path = fs::canonicalize(path).unwrap_or_default();
         walk_data
             .ignore_directories
             .iter()
-            .any(|ignored| ignored.is_absolute() && absolute_entry_path.starts_with(ignored))
+            .any(|ignored| ignored.is_absolute() && path_starts_with(ignored, &absolute_entry_path))
     }
 }
 
@@ -548,6 +558,12 @@ fn process_entry<'scope>(
         return None;
     }
 
+    // BUG-13: stat failed for this file (raced with deletion); build_node
+    // will drop it silently, so record it first
+    if metadata.is_none() {
+        record_metadata_unavailable(&path, walk_data);
+    }
+
     let node = build_node(path, vec![], is_file, pending.depth, walk_data, metadata);
 
     let prog_data = &walk_data.progress_data;
@@ -630,12 +646,31 @@ fn finalize_chain(mut pending: Arc<PendingDir>, walk_data: &WalkData) {
             };
             node
         });
+        // BUG-13: build_node returns None only when metadata is missing
+        // (stat raced with a rename/delete). The fully-walked subtree is
+        // dropped with it; record it so the loss is visible.
+        if node_to_push.is_none() {
+            record_metadata_unavailable(&pending.dir, walk_data);
+        }
         pending = parent;
     }
 }
 
 fn is_retryable(failed: &Error) -> bool {
     failed.kind() == std::io::ErrorKind::Interrupted
+}
+
+// BUG-13: no io::Error survives from the stat (platform::get_metadata is a
+// pure Option helper), so record the path itself. Not wired into
+// record_error's io::ErrorKind match on purpose: it would fall into the
+// unknown_error bucket and lose the "finished subtree was dropped" meaning.
+fn record_metadata_unavailable(path: &Path, walk_data: &WalkData) {
+    walk_data
+        .errors
+        .lock()
+        .unwrap()
+        .metadata_unavailable
+        .insert(path.to_string_lossy().into());
 }
 
 // Some network/virtual filesystems return Interrupted forever; without a cap
@@ -880,6 +915,55 @@ mod tests {
                 .contains(&missing.to_string_lossy().into_owned()),
             "expected file_not_found to contain {missing:?}, got {:?}",
             errors.file_not_found
+        );
+    }
+
+    // BUG-13: a directory whose stat failed (metadata None) is still walked,
+    // but finalize_chain cannot build its Node and would drop the finished
+    // subtree silently; the drop must be recorded instead.
+    #[test]
+    fn test_finalize_records_missing_metadata() {
+        let tmp = tempfile::tempdir().unwrap();
+        let walkdata = create_walker(true);
+
+        let walked_child = Node {
+            name: tmp.path().join("child.txt"),
+            size: 42,
+            children: vec![],
+            inode_device: None,
+            depth: 1,
+            is_file: true,
+        };
+        let outer = Arc::new(PendingDir {
+            dir: PathBuf::new(),
+            depth: 0,
+            kind: DirKind::StatClassified,
+            metadata: None,
+            followed_dir_ids: Arc::new(Mutex::new(HashSet::new())),
+            parent: None,
+            pending: AtomicUsize::new(1),
+            children: Mutex::new(Vec::new()),
+        });
+        // metadata: None simulates the readdir->stat rename/delete race
+        let raced = Arc::new(PendingDir {
+            dir: tmp.path().join("raced"),
+            depth: 0,
+            kind: DirKind::TypedDir,
+            metadata: None,
+            followed_dir_ids: Arc::new(Mutex::new(HashSet::new())),
+            parent: Some(outer.clone()),
+            pending: AtomicUsize::new(1),
+            children: Mutex::new(vec![walked_child]),
+        });
+
+        finalize_chain(raced, &walkdata);
+
+        let errors = walkdata.errors.lock().unwrap();
+        let raced_path = tmp.path().join("raced").to_string_lossy().into_owned();
+        assert!(
+            errors.metadata_unavailable.contains(&raced_path),
+            "expected metadata_unavailable to contain {raced_path:?}, got {:?}",
+            errors.metadata_unavailable
         );
     }
 

@@ -16,14 +16,21 @@ pub fn simplify_dir_names<P: AsRef<Path>>(dirs: &[P]) -> HashSet<PathBuf> {
     // removes every descendant, and the parent is kept.
     let mut normalized: Vec<PathBuf> = dirs.iter().map(normalize_path).collect();
     // Component order, not byte order: with byte order "a/b!x" ('!' < '/')
-    // would sort between "a/b" and its real children and break the scan
+    // would sort between "a/b" and its real children and break the scan.
+    // On Windows the per-component order additionally folds ASCII case
+    // (BUG-2): byte order would sort "Z:/x" and "z:/x" apart with unrelated
+    // paths in between, and the linear scan would keep both spellings.
+    #[cfg(target_os = "windows")]
+    normalized.sort_by(|a, b| cmp_components_ignore_case(a.components(), b.components()));
+    #[cfg(not(target_os = "windows"))]
     normalized.sort_by(|a, b| a.components().cmp(b.components()));
 
     let mut top_level_names = HashSet::with_capacity(normalized.len());
     let mut last_kept: Option<&Path> = None;
     for path in &normalized {
-        // Equal duplicates also start_with themselves and are dropped
-        let is_descendant = matches!(last_kept, Some(kept) if path.starts_with(kept));
+        // Equal duplicates and case-variant spellings (Windows) also
+        // start_with the kept path and are dropped
+        let is_descendant = matches!(last_kept, Some(kept) if path_starts_with(kept, path));
         if !is_descendant {
             last_kept = Some(path.as_path());
             top_level_names.insert(path.clone());
@@ -96,13 +103,114 @@ pub fn is_filtered_out_due_to_invert_regex(filter_regex: &[Regex], dir: &Path) -
         .any(|f| f.is_match(&dir.as_os_str().to_string_lossy()))
 }
 
+// BUG-2: Windows filesystems (NTFS/FAT) match names case-insensitively, so
+// path comparisons used for root dedup, -X ignore matching and --collapse
+// must fold case per component: `z:/Temp/x` and `Z:/TEMP/X` are the same
+// tree. Folding is ASCII-only (full Unicode upcase needs OS tables and the
+// CLI surface is overwhelmingly ASCII). Unix paths stay byte-exact.
+
+// Component-wise prefix test: true when `parent`'s components are a prefix
+// of `child`'s. Components has no len() (not ExactSizeIterator), so the
+// exhaustion pattern below replaces the count check std's starts_with does.
+pub fn path_starts_with(parent: &Path, child: &Path) -> bool {
+    #[cfg(target_os = "windows")]
+    {
+        let mut parent_components = parent.components();
+        let mut child_components = child.components();
+        loop {
+            match (parent_components.next(), child_components.next()) {
+                // parent exhausted: it is a prefix of child
+                (None, _) => return true,
+                // parent still has components but child is exhausted
+                (Some(_), None) => return false,
+                (Some(p), Some(c)) => {
+                    if !component_eq_ignore_case(&p, &c) {
+                        return false;
+                    }
+                },
+            }
+        }
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        child.starts_with(parent)
+    }
+}
+
+// Component-wise equality with the same case semantics as path_starts_with:
+// mutual prefixes imply identical component sequences.
+pub fn path_equivalent(a: &Path, b: &Path) -> bool {
+    #[cfg(target_os = "windows")]
+    {
+        path_starts_with(a, b) && path_starts_with(b, a)
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        a == b
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn component_eq_ignore_case(a: &std::path::Component<'_>, b: &std::path::Component<'_>) -> bool {
+    a.as_os_str()
+        .to_string_lossy()
+        .eq_ignore_ascii_case(&b.as_os_str().to_string_lossy())
+}
+
+// Membership test for small CLI-supplied path sets (-X ignores, --collapse
+// names): exact HashSet hit on Unix; case-folded linear scan on Windows.
+// Sets are tiny, so the scan is negligible.
+pub fn path_set_contains(set: &HashSet<PathBuf>, path: &Path) -> bool {
+    #[cfg(target_os = "windows")]
+    {
+        set.iter().any(|p| path_equivalent(p, path))
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        set.contains(path)
+    }
+}
+
+// Case-folded component order for the simplify_dir_names sort; must agree
+// with component_eq_ignore_case (equal folded components compare Equal) or
+// prefix blocks would not stay contiguous.
+#[cfg(target_os = "windows")]
+fn cmp_components_ignore_case(
+    mut i: std::path::Components<'_>,
+    mut j: std::path::Components<'_>,
+) -> std::cmp::Ordering {
+    use std::cmp::Ordering;
+    loop {
+        match (i.next(), j.next()) {
+            (None, None) => return Ordering::Equal,
+            (None, Some(_)) => return Ordering::Less,
+            (Some(_), None) => return Ordering::Greater,
+            (Some(x), Some(y)) => {
+                let ord = cmp_os_str_ignore_ascii_case(x.as_os_str(), y.as_os_str());
+                if ord != Ordering::Equal {
+                    return ord;
+                }
+            },
+        }
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn cmp_os_str_ignore_ascii_case(a: &std::ffi::OsStr, b: &std::ffi::OsStr) -> std::cmp::Ordering {
+    let a = a.to_string_lossy();
+    let b = b.to_string_lossy();
+    let a = a.chars().map(|c| c.to_ascii_lowercase());
+    let b = b.chars().map(|c| c.to_ascii_lowercase());
+    a.cmp(b)
+}
+
 // Production code no longer calls this (see simplify_dir_names); kept as
 // the documented parent-of semantics for the reference cross-check below
 #[cfg(test)]
 fn is_a_parent_of<P: AsRef<Path>>(parent: P, child: P) -> bool {
     let parent = parent.as_ref();
     let child = child.as_ref();
-    child.starts_with(parent) && !parent.starts_with(child)
+    path_starts_with(parent, child) && !path_starts_with(child, parent)
 }
 
 mod tests {
@@ -195,7 +303,11 @@ mod tests {
             for tt in &top_level_names {
                 if is_a_parent_of(&top_level_name, tt) {
                     to_remove.push(tt.clone());
-                } else if is_a_parent_of(tt, &top_level_name) {
+                } else if is_a_parent_of(tt, &top_level_name)
+                    || path_equivalent(tt, &top_level_name)
+                {
+                    // equivalent: same tree under a different case spelling
+                    // (Windows); keep the first spelling seen
                     can_add = false;
                 }
             }
@@ -222,8 +334,27 @@ mod tests {
             state
         };
         let pool = [
-            "a", "b", "c", "bb", "a/b", "a/b!x", "a/b/c", "a/bc", "x", "x/y", "x/y/z", "src",
-            "src_v2", "src/v2", "a/./b", "a//b", "/a", "/a/b",
+            "a",
+            "b",
+            "c",
+            "bb",
+            "a/b",
+            "a/b!x",
+            "a/b/c",
+            "a/bc",
+            "x",
+            "x/y",
+            "x/y/z",
+            "src",
+            "src_v2",
+            "src/v2",
+            "a/./b",
+            "a//b",
+            "/a",
+            "/a/b", // case variants (BUG-2)
+            "C:/Temp/x",
+            "c:/temp/x/sub",
+            "B",
         ];
         let pool_len = u64::try_from(pool.len()).unwrap();
         for round in 0..500 {
@@ -257,5 +388,28 @@ mod tests {
         assert!(is_a_parent_of("/", "/usr/andy"));
         assert!(is_a_parent_of("/", "/usr"));
         assert!(!is_a_parent_of("/", "/"));
+    }
+
+    // BUG-2: Windows names match case-insensitively
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn test_is_a_parent_of_case_insensitive() {
+        assert!(is_a_parent_of("C:/Temp", "c:/TEMP/x"));
+        assert!(is_a_parent_of("c:/temp/x", "C:/Temp/X/Y"));
+        assert!(!is_a_parent_of("C:/Temp", "c:/temp"));
+        assert!(!is_a_parent_of("C:/Temp", "c:/temp_other"));
+    }
+
+    // BUG-2: roots spelled with different cases are one tree, not two
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn test_simplify_dir_case_variants() {
+        // equal up to case: first spelling wins
+        let correct = HashSet::from([normalize_path("C:/Temp/x")]);
+        assert_eq!(simplify_dir_names(&["C:/Temp/x", "c:/temp/x"]), correct);
+        // case-variant parent subsumes the child spelling (parent wins, as
+        // with the exact-case "a/b" + "a" case on Unix)
+        let correct = HashSet::from([normalize_path("c:/temp/x")]);
+        assert_eq!(simplify_dir_names(&["C:/Temp/x/sub", "c:/temp/x"]), correct);
     }
 }
