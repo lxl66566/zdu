@@ -19,7 +19,7 @@ use crate::{
     progress::{ORDERING, Operation, PAtomicInfo, RuntimeErrors},
     utils::{
         is_filtered_out_due_to_file_time, is_filtered_out_due_to_invert_regex,
-        is_filtered_out_due_to_regex,
+        is_filtered_out_due_to_regex, path_set_contains, path_starts_with,
     },
 };
 
@@ -247,8 +247,10 @@ fn walk_root(
 // canonicalized path of the directory containing `path` (computed once per
 // directory): canonical(child) == canonical_dir + file name, so the absolute
 // check below needs no per-entry canonicalize (PERF-1, ~2x slowdown on -X).
+// BUG-2: all comparisons go through the case-folding helpers so `-X DIR`
+// ignores `dir` on case-insensitive Windows filesystems.
 fn is_ignored_path(path: &Path, canonical_dir: Option<&Path>, walk_data: &WalkData) -> bool {
-    if walk_data.ignore_directories.contains(path) {
+    if path_set_contains(&walk_data.ignore_directories, path) {
         return true;
     }
 
@@ -268,13 +270,13 @@ fn is_ignored_path(path: &Path, canonical_dir: Option<&Path>, walk_data: &WalkDa
         walk_data
             .ignore_directories
             .iter()
-            .any(|ignored| ignored.is_absolute() && dir.join(file_name).starts_with(ignored))
+            .any(|ignored| ignored.is_absolute() && path_starts_with(ignored, &dir.join(file_name)))
     } else {
         let absolute_entry_path = fs::canonicalize(path).unwrap_or_default();
         walk_data
             .ignore_directories
             .iter()
-            .any(|ignored| ignored.is_absolute() && absolute_entry_path.starts_with(ignored))
+            .any(|ignored| ignored.is_absolute() && path_starts_with(ignored, &absolute_entry_path))
     }
 }
 

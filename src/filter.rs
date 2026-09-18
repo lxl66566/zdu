@@ -9,6 +9,7 @@ use crate::{
     display::get_printable_name,
     display_node::DisplayNode,
     node::{FileTime, Node},
+    utils::path_set_contains,
 };
 
 // Aggregation options are boolean display switches by nature
@@ -85,7 +86,8 @@ pub fn fill_remaining_lines<'a>(
                 if !display_data.only_file || line.children.is_empty() {
                     allowed_nodes.insert(line.name.as_path(), line);
                 }
-                if !keep_collapsed.contains(&line.name) {
+                // BUG-2: case-folded on Windows so `-c DIR` collapses `dir`
+                if !path_set_contains(keep_collapsed, &line.name) {
                     heap = add_children(display_data, line, heap);
                 }
             },
