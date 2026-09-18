@@ -16,6 +16,17 @@ jobs:
         os: [ubuntu-latest, windows-latest, macos-latest]
     steps:
       - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      # BUILD-1: build.rs writes completions/man to OUT_DIR only; stage share/
+      # into the repo root so the release action's files_to_pack can pick it
+      # up (it only accepts paths relative to the repo root).
+      - name: stage share/ from build script OUT_DIR
+        shell: bash
+        run: |
+          cargo build
+          src="$(ls -dt target/debug/build/zdu-rs/*/out/share | head -n1)"
+          test -n "$src"
+          cp -r "$src" share
       - name: release rust project
         uses: lxl66566/rust-simple-release@main
         with:

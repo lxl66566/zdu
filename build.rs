@@ -1,9 +1,4 @@
-use std::{
-    env, fs,
-    fs::File,
-    io::Error,
-    path::{Path, PathBuf},
-};
+use std::{env, fs, fs::File, io::Error, path::PathBuf};
 
 use clap::CommandFactory;
 use clap_complete::{generate_to, shells::*};
@@ -11,34 +6,30 @@ use clap_mangen::Man;
 
 include!("src/cli.rs");
 
-// `cargo package`/`publish` verifies the tarball by building under
-// target/package; a build script must not modify the source tree there,
-// so generated assets go to OUT_DIR instead of the repo directories.
-fn packaging_verify() -> bool {
-    let manifest_dir = env::var_os("CARGO_MANIFEST_DIR").unwrap_or_default();
-    let comps: Vec<_> = Path::new(&manifest_dir).components().collect();
-    comps
-        .windows(2)
-        .any(|w| w[0].as_os_str() == "target" && w[1].as_os_str() == "package")
-}
-
 fn main() -> Result<(), Error> {
+    // BUILD-1: generated assets always go to OUT_DIR, never the source tree.
+    // A plain `cargo build` on a read-only checkout (rpmbuild/deb/Nix) used
+    // to fail when writing ./share; the release workflow now copies
+    // OUT_DIR/share out for packaging instead.
+    // Declaring rerun-if-changed opts the script into re-running only when
+    // these files change; otherwise cargo re-runs it (5 completions + man
+    // render) after every incremental edit anywhere in the package.
+    // src/cli.rs is included! below, so it must be listed too.
+    println!("cargo:rerun-if-changed=build.rs");
+    println!("cargo:rerun-if-changed=src/cli.rs");
+
+    let out_dir = PathBuf::from(env::var_os("OUT_DIR").expect("OUT_DIR is set for build scripts"));
     // Generated assets use the same relative layout as their Linux install
     // locations (relative to a prefix like /usr or /usr/local), so the release
     // archive can be extracted directly into a prefix.
     // PowerShell has no standard install dir; it follows the share/ layout for
     // consistency anyway.
-    let root: PathBuf = if packaging_verify() {
-        PathBuf::from(env::var_os("OUT_DIR").expect("OUT_DIR is set for build scripts"))
-    } else {
-        ".".into()
-    };
-    let man_dir = root.join("share/man/man1");
-    let bash_dir = root.join("share/bash-completion/completions");
-    let zsh_dir = root.join("share/zsh/site-functions");
-    let fish_dir = root.join("share/fish/vendor_completions.d");
-    let elvish_dir = root.join("share/elvish/lib");
-    let ps_dir = root.join("share/powershell/completions");
+    let man_dir = out_dir.join("share/man/man1");
+    let bash_dir = out_dir.join("share/bash-completion/completions");
+    let zsh_dir = out_dir.join("share/zsh/site-functions");
+    let fish_dir = out_dir.join("share/fish/vendor_completions.d");
+    let elvish_dir = out_dir.join("share/elvish/lib");
+    let ps_dir = out_dir.join("share/powershell/completions");
     for dir in [
         &man_dir,
         &bash_dir,
