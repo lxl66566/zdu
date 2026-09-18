@@ -48,20 +48,24 @@ pub struct Config {
 }
 
 impl Config {
+    // The two files-from keys resolve as one unit: a config value only
+    // applies when the user passed neither CLI flag, so a config
+    // files0-from can no longer override an explicit CLI --files-from
+    // (BUG-5). The files0 > files dispatch order is main's business.
     pub fn get_files0_from(&self, options: &Cli) -> Option<String> {
-        let from_file = &options.files0_from;
-        match from_file {
-            None => self.files0_from.clone(),
-            Some(x) => Some(x.clone()),
-        }
+        options.files0_from.clone().or_else(|| {
+            (options.files_from.is_none())
+                .then(|| self.files0_from.clone())
+                .flatten()
+        })
     }
 
     pub fn get_files_from(&self, options: &Cli) -> Option<String> {
-        let from_file = &options.files_from;
-        match from_file {
-            None => self.files_from.clone(),
-            Some(x) => Some(x.clone()),
-        }
+        options.files_from.clone().or_else(|| {
+            (options.files0_from.is_none())
+                .then(|| self.files_from.clone())
+                .flatten()
+        })
     }
 
     pub fn get_no_colors(&self, options: &Cli) -> bool {
@@ -527,6 +531,43 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(c_ok.get_output_format(&get_args(vec!["zdu"])), "kib");
+    }
+
+    #[test]
+    fn test_files_from_priority_cli_over_config() {
+        // BUG-5 regression: a config files0-from used to override an explicit
+        // CLI --files-from because each getter fell back independently
+        let c = Config {
+            files0_from: Some("cfg0".to_owned()),
+            files_from: Some("cfg".to_owned()),
+            ..Default::default()
+        };
+
+        // Either CLI flag beats the whole config block
+        let args = get_args(vec!["zdu", "--files-from", "cli"]);
+        assert_eq!(c.get_files_from(&args), Some("cli".to_owned()));
+        assert_eq!(c.get_files0_from(&args), None);
+
+        let args = get_args(vec!["zdu", "--files0-from", "cli0"]);
+        assert_eq!(c.get_files0_from(&args), Some("cli0".to_owned()));
+        assert_eq!(c.get_files_from(&args), None);
+
+        // No CLI flags: config values apply (files0 wins the dispatch,
+        // main warns when the config sets both)
+        let args = get_args(vec!["zdu"]);
+        assert_eq!(c.get_files0_from(&args), Some("cfg0".to_owned()));
+        assert_eq!(c.get_files_from(&args), Some("cfg".to_owned()));
+
+        // Config on one side only
+        let c = Config {
+            files_from: Some("cfg".to_owned()),
+            ..Default::default()
+        };
+        assert_eq!(c.get_files0_from(&get_args(vec!["zdu"])), None);
+        assert_eq!(
+            c.get_files_from(&get_args(vec!["zdu"])),
+            Some("cfg".to_owned())
+        );
     }
 
     #[test]

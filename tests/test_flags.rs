@@ -180,6 +180,49 @@ pub fn test_files0_from_flag_file() {
 }
 
 #[test]
+pub fn test_cli_files_from_beats_config_files0_from() {
+    // BUG-5 regression: a config files0-from used to silently override an
+    // explicit CLI --files-from
+    let tmp = tempfile::tempdir().unwrap();
+    let dir_a = tmp.path().join("dir_a");
+    let dir_b = tmp.path().join("dir_b");
+    std::fs::create_dir_all(&dir_a).unwrap();
+    std::fs::create_dir_all(&dir_b).unwrap();
+    std::fs::write(dir_a.join("marker_a.txt"), b"a").unwrap();
+    std::fs::write(dir_b.join("marker_b.txt"), b"b").unwrap();
+
+    let list0 = tmp.path().join("list0.txt");
+    let list = tmp.path().join("list.txt");
+    std::fs::write(&list0, format!("{}\0", dir_a.to_string_lossy())).unwrap();
+    std::fs::write(&list, format!("{}\n", dir_b.to_string_lossy())).unwrap();
+    let cfg = tmp.path().join("zdu.toml");
+    // forward slashes: backslashes are escapes in basic TOML strings
+    std::fs::write(
+        &cfg,
+        format!(
+            "files0-from = \"{}\"\n",
+            list0.to_string_lossy().replace('\\', "/")
+        ),
+    )
+    .unwrap();
+
+    // Explicit CLI --files-from must win over the config files0-from
+    let output = build_command(vec![
+        "--config",
+        cfg.to_str().unwrap(),
+        "--files-from",
+        list.to_str().unwrap(),
+    ]);
+    assert!(output.contains("marker_b"), "{output}");
+    assert!(!output.contains("marker_a"), "{output}");
+
+    // With no CLI flag, the config files0-from still applies
+    let output = build_command(vec!["--config", cfg.to_str().unwrap()]);
+    assert!(output.contains("marker_a"), "{output}");
+    assert!(!output.contains("marker_b"), "{output}");
+}
+
+#[test]
 pub fn test_files_from_flag_stdin() {
     let mut cmd = cargo_bin_cmd!("zdu");
     cmd.arg("-P").arg("--files-from").arg("-");
