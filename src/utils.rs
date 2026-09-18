@@ -139,6 +139,9 @@ pub fn path_starts_with(parent: &Path, child: &Path) -> bool {
 
 // Component-wise equality with the same case semantics as path_starts_with:
 // mutual prefixes imply identical component sequences.
+// Reachable from production code only on Windows (path_set_contains); on
+// Unix it is used solely by the reference cross-check test below.
+#[cfg_attr(not(any(target_os = "windows", test)), allow(dead_code))]
 pub fn path_equivalent(a: &Path, b: &Path) -> bool {
     #[cfg(target_os = "windows")]
     {

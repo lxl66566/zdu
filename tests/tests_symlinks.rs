@@ -390,13 +390,13 @@ pub fn test_limit_filesystem_with_symlink_arg() {
     std::fs::write(target.path().join("f.bin"), vec![0u8; 4096]).unwrap();
 
     let shm = Path::new("/dev/shm");
-    let (shm_dev, target_dev) = match (std::fs::metadata(shm), target.path().metadata()) {
-        (Ok(a), Ok(b)) => (a.dev(), b.dev()),
-        _ => {
+    let (shm_dev, target_dev) =
+        if let (Ok(a), Ok(b)) = (std::fs::metadata(shm), target.path().metadata()) {
+            (a.dev(), b.dev())
+        } else {
             eprintln!("skipping: /dev/shm or tempdir not statable");
             return;
-        },
-    };
+        };
     if shm_dev == target_dev {
         eprintln!("skipping: /dev/shm and tempdir share one filesystem");
         return;
