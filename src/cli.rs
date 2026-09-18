@@ -41,7 +41,7 @@ pub struct Cli {
 
     /// Exclude any file or directory with a regex matching that listed in this
     /// file, the file entries will be added to the ignore regexs provided by
-    /// --invert_filter
+    /// --invert_filter. Blank lines and lines starting with '#' are skipped
     #[arg(short('I'), long, value_name("FILE"), value_hint(ValueHint::FilePath))]
     pub ignore_all_in_file: Option<String>,
 

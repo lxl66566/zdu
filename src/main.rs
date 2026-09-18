@@ -181,7 +181,17 @@ fn main() {
 
     let ignore_from_file_result = match options.ignore_all_in_file {
         Some(ref val) => match read_to_string(val) {
-            Ok(content) => content.lines().map(Regex::new).collect::<Vec<_>>(),
+            // BUG-8: a blank line compiles to an empty regex that matches
+            // every path, zeroing the whole tree via the invert filter;
+            // skip blank lines and '#' comments like gitignore does
+            Ok(content) => content
+                .lines()
+                .filter(|line| {
+                    let trimmed = line.trim_start();
+                    !trimmed.is_empty() && !trimmed.starts_with('#')
+                })
+                .map(Regex::new)
+                .collect::<Vec<_>>(),
             Err(e) => {
                 eprintln!("Failed to read ignore file '{val}': {e}");
                 process::exit(1)

@@ -160,6 +160,20 @@ pub fn test_ignore_all_in_file() {
 }
 
 #[test]
+pub fn test_ignore_all_in_file_skips_blank_and_comment_lines() {
+    // BUG-8 regression: a blank line compiled to an empty regex matching
+    // every path, zeroing the whole tree; '#hello_file' doubles as a check
+    // that comment lines are skipped (as a regex it would hide hello_file)
+    let tmp = tempfile::tempdir().unwrap();
+    let ig = tmp.path().join("ig.txt");
+    std::fs::write(&ig, "#hello_file\n\n   \nmatch_nothing_zzz\n").unwrap();
+
+    let output = build_command(vec!["-c", "-I", ig.to_str().unwrap(), "tests/test_dir/"]);
+    assert!(output.contains("hello_file"), "{output}");
+    assert!(output.contains("a_file"), "{output}");
+}
+
+#[test]
 pub fn test_files_from_flag_file() {
     let output = build_command(vec![
         "--files-from",
