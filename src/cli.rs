@@ -57,12 +57,16 @@ pub struct Cli {
     pub dereference_links: bool,
 
     /// Only count the files and directories on the same filesystem as the
-    /// supplied directory
+    /// supplied directory. Root arguments resolve to their target's
+    /// filesystem, so a symlink argument does not contribute the link's own
+    /// volume (GNU du -x semantics)
+    // BUG-14: the link's own volume used to empty the whole walk
     #[arg(short('x'), long)]
     pub limit_filesystem: bool,
 
-    /// Use file length instead of blocks (on Windows the default mode is the
-    /// on-disk size, which equals file length for plain files)
+    /// Use file length instead of blocks (on Windows the default mode reports
+    /// stored bytes for sparse/cloud-placeholder files and file length
+    /// otherwise)
     #[arg(short('s'), long)]
     pub apparent_size: bool,
 
@@ -164,7 +168,11 @@ pub struct Cli {
     #[arg(long)]
     pub print_errors: bool,
 
-    /// Only directories will be displayed.
+    /// Only non-file entries will be displayed: directories and links
+    /// (including dangling ones)
+    // PERF-4 semantic change: entries are classified by the walker-known
+    // is_file instead of a follow-stat is_dir(), so non-regular entries are
+    // kept instead of silently dropped
     #[arg(
         short('D'),
         long,
@@ -197,7 +205,7 @@ pub struct Cli {
     )]
     pub params: Option<Vec<String>>,
 
-    /// Output the directory tree as json to the current directory
+    /// Output the directory tree as JSON to stdout
     #[arg(short('j'), long)]
     pub output_json: bool,
 
@@ -231,8 +239,8 @@ pub struct Cli {
     #[arg(long, value_hint(ValueHint::AnyPath))]
     pub collapse: Option<Vec<String>>,
 
-    /// Directory 'size' is max filetime of child files instead of disk size.
-    /// while a/c/m for last accessed/changed/modified time
+    /// Directory 'size' is max filetime of child files instead of disk size;
+    /// a/c/m selects last accessed/changed/modified time
     // Combining -f with -m corrupts output: filecount wins per-file (size=1)
     // but filetime's max-aggregation then collapses every directory to 1.
     #[arg(short('m'), long, value_enum, conflicts_with("filecount"))]
