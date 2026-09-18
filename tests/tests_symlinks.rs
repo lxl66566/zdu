@@ -190,6 +190,33 @@ pub fn test_sym_link_dir_loop_with_dereference() {
     );
 }
 
+// BUG-11: a symlink pointing back to the walk root itself must be treated
+// as a loop under -L. Without seeding the root's (dev,ino) into the
+// followed-dir set, the whole subtree was walked and counted a second time
+// under -p (where the global hardlink dedup can't mask it).
+#[cfg(not(target_os = "windows"))]
+#[test]
+pub fn test_sym_link_to_root_not_walked_twice() {
+    let dir = Builder::new().tempdir().unwrap();
+    let dir_s = dir.path().to_str().unwrap();
+
+    std::fs::write(dir.path().join("big.bin"), vec![0u8; 100_000]).unwrap();
+    let self_link = dir.path().join("self");
+    link_it(&self_link, dir_s, true);
+
+    let mut cmd = cargo_bin_cmd!("zdu");
+    let output = cmd
+        .args(["-s", "-c", "-p", "-w", "999", "-L", dir_s])
+        .unwrap();
+    assert!(output.status.success());
+    let stdout = str::from_utf8(&output.stdout).unwrap();
+    assert_eq!(
+        stdout.matches("big.bin").count(),
+        1,
+        "root self-loop walked twice: {stdout}"
+    );
+}
+
 // Windows junctions need no elevated privileges, unlike symlinks. `mklink /J`
 // creates the same kind of reparse-point loop that `C:\Users` trees contain.
 #[cfg(target_os = "windows")]

@@ -198,6 +198,14 @@ fn walk_root(
         walk_data.use_apparent_size,
         walk_data.follow_links && root_is_symlink,
     );
+    // BUG-11: seed the root's own id so a -L symlink pointing back to the
+    // root itself (a/self -> a) is detected as a loop. Without it the whole
+    // subtree was descended into a second time; only -p runs noticed,
+    // because otherwise the global hardlink dedup happens to claim the
+    // root id first and masks the double walk.
+    if let Some((_, Some(id), _)) = root_metadata.as_ref() {
+        followed_dir_ids.lock().unwrap().insert(*id);
+    }
     // Root dedup (cross-root hardlinks / bind mounts): claim before walking
     // so a duplicate root skips its whole subtree, matching the old post-walk
     // clean_inodes drop of the finished root node. Computed before the
