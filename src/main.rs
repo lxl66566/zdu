@@ -36,7 +36,9 @@ use terminal_size::{Height, Width, terminal_size};
 use utils::{canonicalize_absolute_path, get_filesystem_devices, simplify_dir_names};
 
 use self::display::draw_it;
-use crate::{cli::Cli, config::Config, display_node::DisplayNode, progress::RuntimeErrors};
+use crate::{
+    cli::Cli, config::Config, display_node::DisplayNode, node::FileTime, progress::RuntimeErrors,
+};
 
 static DEFAULT_NUMBER_OF_LINES: usize = 30;
 static DEFAULT_TERMINAL_WIDTH: usize = 80;
@@ -235,6 +237,14 @@ fn main() {
         .flat_map(|x| simplified_dirs.iter().map(move |d| d.join(&x)))
         .collect();
 
+    // PERF-6: absolute ignores pre-extracted once so the per-entry ignore
+    // check never rescans the whole set for this run-constant
+    let absolute_ignore_directories: Vec<PathBuf> = ignored_full_path
+        .iter()
+        .filter(|p| p.is_absolute())
+        .cloned()
+        .collect();
+
     let output_format = config.get_output_format(&options);
 
     let ignore_hidden = config.get_ignore_hidden(&options);
@@ -263,6 +273,7 @@ fn main() {
 
     let walk_data = WalkData {
         ignore_directories: ignored_full_path,
+        absolute_ignore_directories,
         filter_regex: &filter_regexs,
         invert_filter_regex: &invert_filter_regexs,
         allowed_filesystems,
@@ -329,27 +340,31 @@ fn main() {
             &options,
             &tree,
             walk_data.by_filecount,
+            by_filetime,
             is_colors,
             terminal_width,
+            output_format,
         );
     });
 }
 
+// PERF-8: by_filetime and output_format are computed once in main and
+// passed in; they used to be recomputed here (get_filetime, get_output_format)
 fn print_output(
     config: &Config,
     options: &Cli,
     tree: &DisplayNode,
     by_filecount: bool,
+    by_filetime: Option<FileTime>,
     is_colors: bool,
     terminal_width: usize,
+    output_format: String,
 ) {
-    let output_format = config.get_output_format(options);
-
     if config.get_output_json(options) {
         OUTPUT_TYPE.with(|wrapped| {
             // -m: raw integer timestamps (BUG-10); -f: raw integer counts;
             // otherwise human-readable sizes per the output format
-            if options.filetime.is_some() {
+            if by_filetime.is_some() {
                 wrapped.replace(JsonSizeFormat::Timestamp);
             } else if by_filecount {
                 wrapped.replace(JsonSizeFormat::Count);
@@ -374,7 +389,7 @@ fn print_output(
             colors_on: is_colors,
             dim: config.get_dim(options),
             by_filecount,
-            by_filetime: Config::get_filetime(options),
+            by_filetime,
             is_screen_reader: config.get_screen_reader(options),
             output_format,
             bars_on_right: config.get_bars_on_right(options),

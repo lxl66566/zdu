@@ -67,7 +67,9 @@ pub struct PAtomicInfo {
 impl PAtomicInfo {
     pub fn clear_state(&self, dir: &Path) {
         self.state.store(Operation::INDEXING, ORDERING);
-        let dir_name = dir.to_string_lossy().to_string();
+        // PERF-8: into_owned moves the Cow's buffer when owned instead of
+        // cloning it a second time
+        let dir_name = dir.to_string_lossy().into_owned();
         self.current_path.set(dir_name);
         self.total_file_size.store(0, ORDERING);
         self.num_files.store(0, ORDERING);

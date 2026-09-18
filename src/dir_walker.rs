@@ -34,6 +34,12 @@ pub enum Operator {
 #[allow(clippy::struct_excessive_bools)]
 pub struct WalkData<'a> {
     pub ignore_directories: HashSet<PathBuf>,
+    // PERF-6: absolute members of ignore_directories, extracted once.
+    // "Any absolute ignore present?" is a constant per run, yet the old code
+    // re-scanned the whole set per entry (is_ignored_path) and per directory
+    // (canonical_dir decision); an empty Vec short-circuits both. Relative
+    // ignores (the common `-X name` case) never pay the canonicalize path.
+    pub absolute_ignore_directories: Vec<PathBuf>,
     pub filter_regex: &'a [Regex],
     pub invert_filter_regex: &'a [Regex],
     pub allowed_filesystems: HashSet<u64>,
@@ -262,11 +268,8 @@ fn is_ignored_path(path: &Path, canonical_dir: Option<&Path>, walk_data: &WalkDa
         return true;
     }
 
-    if !walk_data
-        .ignore_directories
-        .iter()
-        .any(|ignored| ignored.is_absolute())
-    {
+    let absolute_ignores = &walk_data.absolute_ignore_directories;
+    if absolute_ignores.is_empty() {
         return false;
     }
 
@@ -275,16 +278,14 @@ fn is_ignored_path(path: &Path, canonical_dir: Option<&Path>, walk_data: &WalkDa
     // per-entry canonicalize.
     if let Some(dir) = canonical_dir {
         let file_name = path.file_name().unwrap_or_default();
-        walk_data
-            .ignore_directories
+        absolute_ignores
             .iter()
-            .any(|ignored| ignored.is_absolute() && path_starts_with(ignored, &dir.join(file_name)))
+            .any(|ignored| path_starts_with(ignored, &dir.join(file_name)))
     } else {
         let absolute_entry_path = fs::canonicalize(path).unwrap_or_default();
-        walk_data
-            .ignore_directories
+        absolute_ignores
             .iter()
-            .any(|ignored| ignored.is_absolute() && path_starts_with(ignored, &absolute_entry_path))
+            .any(|ignored| path_starts_with(ignored, &absolute_entry_path))
     }
 }
 
@@ -365,15 +366,12 @@ fn walk_dir<'scope>(
     };
     if is_dir {
         // Canonicalized once per directory, reused for every entry's ignore
-        // check (PERF-1). Only needed when absolute ignore paths are in play.
-        let canonical_dir: Option<PathBuf> = if walk_data
-            .ignore_directories
-            .iter()
-            .any(|ignored| ignored.is_absolute())
-        {
-            fs::canonicalize(&pending.dir).ok()
-        } else {
+        // check (PERF-1). Only needed when absolute ignore paths are in play
+        // (PERF-6: constant per run, precomputed in WalkData).
+        let canonical_dir: Option<PathBuf> = if walk_data.absolute_ignore_directories.is_empty() {
             None
+        } else {
+            fs::canonicalize(&pending.dir).ok()
         };
         // EINTR is the only retryable error. Looping iteratively (rather than
         // recursing on retry, like the old code) keeps stack depth O(1).
@@ -564,7 +562,17 @@ fn process_entry<'scope>(
         record_metadata_unavailable(&path, walk_data);
     }
 
-    let node = build_node(path, vec![], is_file, pending.depth, walk_data, metadata);
+    // already_filtered=is_file: ignore_file already ran the is_file-gated
+    // regex/filetime checks on this path and the entry survived (PERF-5)
+    let node = build_node(
+        path,
+        vec![],
+        is_file,
+        is_file,
+        pending.depth,
+        walk_data,
+        metadata,
+    );
 
     let prog_data = &walk_data.progress_data;
     prog_data.num_files.fetch_add(1, ORDERING);
@@ -624,6 +632,9 @@ fn finalize_chain(mut pending: Arc<PendingDir>, walk_data: &WalkData) {
         node_to_push = build_node(
             pending.dir.clone(),
             children,
+            false,
+            // directories never went through ignore_file's is_file-gated
+            // checks, so build_node must still evaluate them
             false,
             pending.depth,
             walk_data,
@@ -687,6 +698,16 @@ const MAX_EINTR_RETRIES: u32 = 999;
 // cannot seek past already-consumed entries.
 const MIN_PAR_ENTRIES: usize = 64;
 
+// PERF-8 (evaluated, kept as-is): the single global Mutex looks like a
+// serialization point next to InodeSet's shards, but it is not one in
+// practice. Every recorded error is preceded by a failed directory-open
+// syscall (microseconds), and the error count is bounded by the number of
+// unopenable directories in the tree (C:\Windows full scan: ~44). A
+// micro-benchmark of exactly this lock+insert+String work saturates at
+// ~1.37M errors/s under 32-thread contention (~731 ns/error), so even a
+// pathological 10k-error tree spends ~7 ms total here vs seconds of walk.
+// Sharding RuntimeErrors (4 locks, new public shape) or thread-local
+// aggregation (rayon lifetime + merge step) would be over-engineering.
 fn record_error(failed: &Error, dir: &Path, walk_data: &WalkData) {
     let mut editable_error = walk_data.errors.lock().unwrap();
     match failed.kind() {
@@ -716,17 +737,19 @@ fn record_error(failed: &Error, dir: &Path, walk_data: &WalkData) {
     }
 }
 
-mod tests {
+// pub(crate): node.rs unit tests reuse create_walker to build a WalkData
+#[cfg(test)]
+pub(crate) mod tests {
 
     #[allow(unused_imports)]
     use super::*;
 
-    #[cfg(test)]
-    fn create_walker<'a>(use_apparent_size: bool) -> WalkData<'a> {
+    pub(crate) fn create_walker<'a>(use_apparent_size: bool) -> WalkData<'a> {
         use crate::PIndicator;
         let indicator = PIndicator::build_me();
         WalkData {
             ignore_directories: HashSet::new(),
+            absolute_ignore_directories: Vec::new(),
             filter_regex: &[],
             invert_filter_regex: &[],
             allowed_filesystems: HashSet::new(),
@@ -741,6 +764,41 @@ mod tests {
             progress_data: indicator.data.clone(),
             errors: Arc::new(Mutex::new(RuntimeErrors::default())),
         }
+    }
+
+    // PERF-6: the absolute-ignore short-circuit must preserve -X semantics
+    // (exact hit, absolute prefix hit, no match) with the precomputed Vec
+    #[test]
+    fn test_is_ignored_path_semantics() {
+        let tmp = tempfile::tempdir().unwrap();
+        let ignored_dir = tmp.path().join("node_modules");
+        fs::create_dir_all(&ignored_dir).unwrap();
+
+        let mut walk_data = create_walker(true);
+        walk_data.ignore_directories = [tmp.path().join("plain")]
+            .into_iter()
+            .collect::<HashSet<_>>();
+
+        // Relative ignores only: no absolute prefixes, no match anywhere
+        assert!(!is_ignored_path(&ignored_dir, None, &walk_data));
+
+        // Exact hit still wins
+        assert!(is_ignored_path(&tmp.path().join("plain"), None, &walk_data));
+
+        // Absolute prefix: parent canonical_dir + file name falls inside it
+        let absolute = fs::canonicalize(&ignored_dir).unwrap();
+        walk_data.absolute_ignore_directories = vec![absolute];
+        let inside = ignored_dir.join("pkg");
+        let canonical_parent = fs::canonicalize(&ignored_dir).ok();
+        assert!(is_ignored_path(
+            &inside,
+            canonical_parent.as_deref(),
+            &walk_data
+        ));
+
+        // Outside the prefix: no match
+        let outside = tmp.path().join("other");
+        assert!(!is_ignored_path(&outside, None, &walk_data));
     }
 
     // Hardlinks share (dev, ino); with block sizes only the first-seen link
@@ -805,7 +863,6 @@ mod tests {
         assert_eq!(surviving, 1);
     }
 
-    #[cfg(test)]
     fn count_nodes(node: &Node) -> usize {
         let mut count = 0;
         let mut stack: Vec<&Node> = vec![node];
@@ -816,7 +873,6 @@ mod tests {
         count
     }
 
-    #[cfg(test)]
     fn max_depth(node: &Node) -> usize {
         let mut max = node.depth;
         let mut stack: Vec<&Node> = vec![node];

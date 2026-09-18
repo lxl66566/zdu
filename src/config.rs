@@ -1,6 +1,7 @@
 use std::{
     path::{Path, PathBuf},
     process,
+    sync::LazyLock,
 };
 
 use chrono::{Local, TimeZone};
@@ -285,12 +286,16 @@ fn convert_min_size(input: &str) -> Option<usize> {
     })
 }
 
+// PERF-8: compiled once. parse_min_size is currently called only once per
+// run, but every call recompiled the regex; LazyLock keeps that a constant
+// no matter how many config/CLI paths end up parsing.
+static MIN_SIZE_RE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"^([0-9]+(?:\.[0-9]+)?)([a-zA-Z]*)$").unwrap());
+
 fn parse_min_size(input: &str) -> Option<usize> {
     // Anchored with optional decimals so "1.5k" no longer parses as 1 and
     // garbage input is rejected wholesale
-    let re = Regex::new(r"^([0-9]+(?:\.[0-9]+)?)([a-zA-Z]*)$").unwrap();
-
-    let (_, [number, letters]) = re.captures(input).map(|c| c.extract())?;
+    let (_, [number, letters]) = MIN_SIZE_RE.captures(input).map(|c| c.extract())?;
 
     let multiple: u128 = if letters.is_empty() {
         1
