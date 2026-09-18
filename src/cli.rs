@@ -90,7 +90,8 @@ pub struct Cli {
     #[arg(short('B'), long)]
     pub bars_on_right: bool,
 
-    /// Minimum size file to include in output
+    /// Minimum size for files to be included in the output. A file counts
+    /// only when strictly greater than this size (GNU du semantics)
     #[arg(short('z'), long)]
     pub min_size: Option<String>,
 
@@ -130,13 +131,16 @@ pub struct Cli {
 
     /// show only these file types
     // -F is meaningless here (extension aggregation ignores only_file);
-    // reject instead of silently ignoring it
+    // reject instead of silently ignoring it. Same for --min-size and
+    // --collapse: the aggregation path never applies them.
     #[arg(
         short('t'),
         long,
         conflicts_with("depth"),
         conflicts_with("only_dir"),
-        conflicts_with("only_file")
+        conflicts_with("only_file"),
+        conflicts_with("min_size"),
+        conflicts_with("collapse")
     )]
     pub file_types: bool,
 
@@ -337,5 +341,17 @@ mod tests {
         assert!(Cli::try_parse_from(["zdu", "-T", "1"]).is_ok());
         assert!(Cli::try_parse_from(["zdu", "-T", "0"]).is_err());
         assert!(Cli::try_parse_from(["zdu", "--threads", "0"]).is_err());
+    }
+
+    #[test]
+    fn file_types_conflict_with_min_size_and_collapse() {
+        // -t aggregates by extension and never applies --min-size or
+        // --collapse; reject the combination instead of silently ignoring
+        // those options
+        assert!(Cli::try_parse_from(["zdu", "-t"]).is_ok());
+        assert!(Cli::try_parse_from(["zdu", "--min-size", "1M"]).is_ok());
+        assert!(Cli::try_parse_from(["zdu", "--collapse", "d"]).is_ok());
+        assert!(Cli::try_parse_from(["zdu", "-t", "--min-size", "1M"]).is_err());
+        assert!(Cli::try_parse_from(["zdu", "-t", "--collapse", "d"]).is_err());
     }
 }
