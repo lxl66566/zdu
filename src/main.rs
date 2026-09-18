@@ -210,7 +210,7 @@ fn main() {
     let follow_links = options.dereference_links;
 
     let allowed_filesystems = if limit_filesystem {
-        get_filesystem_devices(&target_dirs, follow_links)
+        get_filesystem_devices(&target_dirs)
     } else {
         HashSet::default()
     };

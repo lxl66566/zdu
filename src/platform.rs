@@ -282,3 +282,21 @@ pub fn get_entry_metadata(
 ) -> Option<(u64, Option<InodeAndDevice>, FileTime)> {
     get_metadata(entry.path(), use_apparent_size, follow_links)
 }
+
+// Device of the filesystem containing `path`'s *target* (symlinks followed),
+// for -x setup. Called once per root argument. GNU du -x stats its
+// command-line arguments: the allowed volume is the target's, not the link's
+// own (BUG-14: without -L the link's volume emptied the whole walk).
+#[cfg(target_family = "unix")]
+pub fn get_filesystem_device<P: AsRef<Path>>(path: P) -> Option<u64> {
+    get_metadata(path, false, true).and_then(|(_, id, _)| id.map(|(_, dev)| dev))
+}
+
+// Same, but on Windows the cheap path returns no file id, which used to leave
+// allowed_filesystems empty and -x silently inert (BUG-4): always take the
+// expensive open, which also resolves reparse points. apparent mode skips
+// the extra size_on_disk query; only the id is consumed.
+#[cfg(target_family = "windows")]
+pub fn get_filesystem_device<P: AsRef<Path>>(path: P) -> Option<u64> {
+    get_metadata_expensive(path.as_ref(), true).and_then(|(_, id, _)| id.map(|(_, dev)| dev))
+}

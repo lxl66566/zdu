@@ -347,3 +347,55 @@ pub fn test_sparse_file_allocated_vs_apparent_size() {
     // file; 0 on NTFS, up to 64 Ki on volumes with coarser sparse support)
     assert!(run(&[]) < 512 * 1024);
 }
+
+// BUG-14 regression: like GNU du -x, command-line arguments are stat'ed with
+// follow semantics, so -x with a symlink argument must filter by the
+// *target's* volume. Pre-fix, the link's own volume was collected and the
+// target's contents were filtered to nothing when the two differed.
+// Needs the symlink and its target on different filesystems: /dev/shm
+// (tmpfs) vs the tempdir's real filesystem; skips when they coincide.
+#[cfg(all(unix, not(target_os = "macos")))]
+#[test]
+pub fn test_limit_filesystem_with_symlink_arg() {
+    use std::os::unix::fs::MetadataExt;
+
+    let target = Builder::new().tempdir().unwrap();
+    std::fs::write(target.path().join("f.bin"), vec![0u8; 4096]).unwrap();
+
+    let shm = Path::new("/dev/shm");
+    let (shm_dev, target_dev) = match (std::fs::metadata(shm), target.path().metadata()) {
+        (Ok(a), Ok(b)) => (a.dev(), b.dev()),
+        _ => {
+            eprintln!("skipping: /dev/shm or tempdir not statable");
+            return;
+        },
+    };
+    if shm_dev == target_dev {
+        eprintln!("skipping: /dev/shm and tempdir share one filesystem");
+        return;
+    }
+
+    let link = shm.join(format!("zdu_link_{}", std::process::id()));
+    std::os::unix::fs::symlink(target.path(), &link).unwrap();
+
+    let mut cmd = cargo_bin_cmd!("zdu");
+    let output = cmd
+        .args([
+            "-x",
+            "-s",
+            "-c",
+            "-w",
+            "999",
+            "-d",
+            "1",
+            link.to_str().unwrap(),
+        ])
+        .unwrap();
+    let _ = std::fs::remove_file(&link);
+    assert!(output.status.success());
+    let stdout = str::from_utf8(&output.stdout).unwrap();
+    assert!(
+        stdout.contains("f.bin"),
+        "-x filtered the target contents through a symlink argument: {stdout}"
+    );
+}
