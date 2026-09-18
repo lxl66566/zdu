@@ -58,11 +58,21 @@ impl From<crate::cli::FileTime> for FileTime {
 
 // PERF-2: metadata is fetched once per entry by the walker and handed in,
 // instead of each stage (ignore checks, node building) stat-ing again
+//
+// PERF-5: `already_filtered` marks entries that already survived
+// `ignore_file`'s is_file-gated checks (regex, invert regex, filetime) — for
+// those the outcome here is necessarily "not filtered", so the size-zeroing
+// checks are skipped instead of re-evaluating every regex on every file.
+// Callers that did NOT go through those checks (directories from
+// finalize_chain, non-regular entries) must pass false: the zeroing still
+// applies to them (e.g. a directory whose own name matches the invert regex
+// contributes no own-block size).
 #[allow(clippy::too_many_arguments)]
 pub fn build_node(
     dir: PathBuf,
     children: Vec<Node>,
     is_file: bool,
+    already_filtered: bool,
     depth: usize,
     walk_data: &WalkData,
     metadata: Option<EntryMetadata>,
@@ -73,18 +83,22 @@ pub fn build_node(
     metadata.map(|data| {
         let inode_device = data.1;
 
-        let size = if is_filtered_out_due_to_regex(walk_data.filter_regex, &dir)
-            || is_filtered_out_due_to_invert_regex(walk_data.invert_filter_regex, &dir)
-            || by_filecount && !is_file
-            || [
-                (&walk_data.filter_modified_time, data.2.0),
-                (&walk_data.filter_accessed_time, data.2.1),
-                (&walk_data.filter_changed_time, data.2.2),
-            ]
-            .iter()
-            .any(|(filter_time, actual_time)| {
-                is_filtered_out_due_to_file_time(filter_time.as_ref(), *actual_time)
-            }) {
+        let filtered_out = !already_filtered && {
+            let regex_or_time_filtered = is_filtered_out_due_to_regex(walk_data.filter_regex, &dir)
+                || is_filtered_out_due_to_invert_regex(walk_data.invert_filter_regex, &dir)
+                || [
+                    (&walk_data.filter_modified_time, data.2.0),
+                    (&walk_data.filter_accessed_time, data.2.1),
+                    (&walk_data.filter_changed_time, data.2.2),
+                ]
+                .iter()
+                .any(|(filter_time, actual_time)| {
+                    is_filtered_out_due_to_file_time(filter_time.as_ref(), *actual_time)
+                });
+            regex_or_time_filtered || (by_filecount && !is_file)
+        };
+
+        let size = if filtered_out {
             0
         } else if by_filecount {
             1
@@ -136,6 +150,46 @@ mod tests {
     use chrono::TimeZone;
 
     use super::*;
+
+    // PERF-5: already_filtered=true must skip the regex zeroing (the caller
+    // guarantees the file survived ignore_file), while directories and
+    // unfiltered entries keep the size-zeroing semantics
+    #[test]
+    fn test_build_node_already_filtered_skips_regex_zeroing() {
+        use regex::Regex;
+
+        use crate::dir_walker::tests::create_walker;
+
+        // -v keeps only matching files: a non-matching regex means the file
+        // would be zeroed unless the caller already filtered it
+        let regex = vec![Regex::new("zzz_nomatch").unwrap()];
+        let mut walk_data = create_walker(true);
+        walk_data.filter_regex = &regex;
+
+        let file = PathBuf::from("/tmp/keepme.txt");
+        let meta = Some((100, None, (0, 0, 0)));
+        let kept = build_node(file.clone(), vec![], true, true, 1, &walk_data, meta).unwrap();
+        assert_eq!(kept.size, 100);
+        let zeroed = build_node(file, vec![], true, false, 1, &walk_data, meta).unwrap();
+        assert_eq!(zeroed.size, 0);
+
+        // A directory matching the invert regex is always zero-checked
+        // (directories never take the already_filtered path)
+        let invert = vec![Regex::new("matchdir").unwrap()];
+        walk_data.filter_regex = &[];
+        walk_data.invert_filter_regex = &invert;
+        let dir = build_node(
+            PathBuf::from("/tmp/matchdir"),
+            vec![],
+            false,
+            false,
+            0,
+            &walk_data,
+            meta,
+        )
+        .unwrap();
+        assert_eq!(dir.size, 0);
+    }
 
     #[test]
     fn test_filetime_encoding_preserves_order_and_sign() {

@@ -564,7 +564,17 @@ fn process_entry<'scope>(
         record_metadata_unavailable(&path, walk_data);
     }
 
-    let node = build_node(path, vec![], is_file, pending.depth, walk_data, metadata);
+    // already_filtered=is_file: ignore_file already ran the is_file-gated
+    // regex/filetime checks on this path and the entry survived (PERF-5)
+    let node = build_node(
+        path,
+        vec![],
+        is_file,
+        is_file,
+        pending.depth,
+        walk_data,
+        metadata,
+    );
 
     let prog_data = &walk_data.progress_data;
     prog_data.num_files.fetch_add(1, ORDERING);
@@ -624,6 +634,9 @@ fn finalize_chain(mut pending: Arc<PendingDir>, walk_data: &WalkData) {
         node_to_push = build_node(
             pending.dir.clone(),
             children,
+            false,
+            // directories never went through ignore_file's is_file-gated
+            // checks, so build_node must still evaluate them
             false,
             pending.depth,
             walk_data,
@@ -716,13 +729,14 @@ fn record_error(failed: &Error, dir: &Path, walk_data: &WalkData) {
     }
 }
 
-mod tests {
+// pub(crate): node.rs unit tests reuse create_walker to build a WalkData
+#[cfg(test)]
+pub(crate) mod tests {
 
     #[allow(unused_imports)]
     use super::*;
 
-    #[cfg(test)]
-    fn create_walker<'a>(use_apparent_size: bool) -> WalkData<'a> {
+    pub(crate) fn create_walker<'a>(use_apparent_size: bool) -> WalkData<'a> {
         use crate::PIndicator;
         let indicator = PIndicator::build_me();
         WalkData {
@@ -805,7 +819,6 @@ mod tests {
         assert_eq!(surviving, 1);
     }
 
-    #[cfg(test)]
     fn count_nodes(node: &Node) -> usize {
         let mut count = 0;
         let mut stack: Vec<&Node> = vec![node];
@@ -816,7 +829,6 @@ mod tests {
         count
     }
 
-    #[cfg(test)]
     fn max_depth(node: &Node) -> usize {
         let mut max = node.depth;
         let mut stack: Vec<&Node> = vec![node];
