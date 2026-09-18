@@ -78,6 +78,14 @@ impl PAtomicInfo {
 pub struct RuntimeErrors {
     pub no_permissions: HashSet<String>,
     pub file_not_found: HashSet<String>,
+    // BUG-17: roots that exist but are neither a directory nor a regular
+    // file (FIFO/socket/device). GNU du reports those as "not a directory";
+    // lumping them into file_not_found printed a misleading "No such file
+    // or directory".
+    pub not_a_directory: HashSet<String>,
+    // BUG-17: directories whose listing kept failing with EINTR even after
+    // MAX_EINTR_RETRIES retries; their subtree is missing from the totals.
+    pub eintr_exhausted: HashSet<String>,
     pub unknown_error: HashSet<String>,
     // BUG-13: entries whose stat failed (e.g. directory renamed/deleted
     // between readdir and stat). The walker still walks their subtree but

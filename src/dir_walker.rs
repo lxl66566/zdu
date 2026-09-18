@@ -389,6 +389,7 @@ fn walk_dir<'scope>(
                     if is_retryable(failed) {
                         eintr_retries += 1;
                         if eintr_retries > MAX_EINTR_RETRIES {
+                            record_eintr_exhausted(&pending.dir, walk_data);
                             break;
                         }
                         continue;
@@ -416,6 +417,7 @@ fn walk_dir<'scope>(
                 record_error(failed, &pending.dir, walk_data);
                 eintr_retries += 1;
                 if eintr_retries > MAX_EINTR_RETRIES {
+                    record_eintr_exhausted(&pending.dir, walk_data);
                     break;
                 }
                 continue;
@@ -462,9 +464,24 @@ fn walk_dir<'scope>(
             break;
         }
     } else if !pending.dir.is_file() {
+        // BUG-17: a root that is neither a dir nor a regular file used to be
+        // reported as file_not_found ("No such file or directory"), which is
+        // misleading for FIFOs/sockets/devices that clearly exist. Split by
+        // lstat: missing or dangling-link roots keep the not-found wording
+        // (GNU du: "cannot access ... No such file or directory"), existing
+        // non-dir non-file roots get a distinct "Not a directory" bucket.
         let mut editable_error = walk_data.errors.lock().unwrap();
         let bad_file = pending.dir.as_os_str().to_string_lossy().into();
-        editable_error.file_not_found.insert(bad_file);
+        match fs::symlink_metadata(&pending.dir) {
+            // dangling link: both is_dir() and is_file() stats failed on the
+            // (missing) target, but the link itself exists
+            Ok(md) if !md.file_type().is_symlink() => {
+                editable_error.not_a_directory.insert(bad_file);
+            },
+            _ => {
+                editable_error.file_not_found.insert(bad_file);
+            },
+        }
     }
 
     finalize_chain(pending, walk_data);
@@ -673,6 +690,22 @@ fn record_metadata_unavailable(path: &Path, walk_data: &WalkData) {
         .insert(path.to_string_lossy().into());
 }
 
+// BUG-17: called when a directory's listing still fails with EINTR after
+// MAX_EINTR_RETRIES retries. The directory ends up empty in the totals, so
+// the loss must be recorded. Reporting happens through the shared error
+// sink (printed after the progress indicator stops), not an immediate
+// eprintln: the old eprintln inside record_error fired from rayon workers
+// while the spinner was live, interleaving output, and re-fired on every
+// call once the global counter passed 999 (1000 prints per directory).
+fn record_eintr_exhausted(dir: &Path, walk_data: &WalkData) {
+    walk_data
+        .errors
+        .lock()
+        .unwrap()
+        .eintr_exhausted
+        .insert(dir.to_string_lossy().into());
+}
+
 // Some network/virtual filesystems return Interrupted forever; without a cap
 // the walk would spin indefinitely (upstream v1.2.5 gives up after 999)
 const MAX_EINTR_RETRIES: u32 = 999;
@@ -699,16 +732,9 @@ fn record_error(failed: &Error, dir: &Path, walk_data: &WalkData) {
             editable_error.file_not_found.insert(failed.to_string());
         },
         std::io::ErrorKind::Interrupted => {
+            // Count only; the give-up itself is reported once per directory
+            // via record_eintr_exhausted when retries are exhausted
             editable_error.interrupted_error += 1;
-            // This does happen on some systems. It was set to 3 but sometimes zdu runs would exceed
-            // this However, if there is no limit this results in infinite retrys and
-            // zdu never finishes
-            if editable_error.interrupted_error > 999 {
-                eprintln!(
-                    "Too many Interrupted Errors occurred while scanning filesystem, skipping: {}",
-                    dir.to_string_lossy()
-                );
-            }
         },
         _ => {
             editable_error.unknown_error.insert(failed.to_string());
@@ -915,6 +941,54 @@ mod tests {
                 .contains(&missing.to_string_lossy().into_owned()),
             "expected file_not_found to contain {missing:?}, got {:?}",
             errors.file_not_found
+        );
+    }
+
+    // BUG-17: roots that exist but are neither a directory nor a regular
+    // file must not be reported as "No such file or directory". A unix
+    // socket stands in for FIFO/device (same classification, no mkfifo
+    // command needed); a dangling link must stay in file_not_found.
+    #[cfg(unix)]
+    #[test]
+    fn test_special_file_root_error_classification() {
+        use std::os::unix::{fs::symlink, net::UnixListener};
+
+        let tmp = tempfile::tempdir().unwrap();
+        let sock = tmp.path().join("sock");
+        UnixListener::bind(&sock).unwrap();
+        let dangling = tmp.path().join("dangling");
+        symlink("/nonexistent-zdu-test-target", &dangling).unwrap();
+
+        let walkdata = create_walker(true);
+        let mut roots = HashSet::new();
+        roots.insert(sock.clone());
+        roots.insert(dangling.clone());
+
+        let _ = walk_it(roots, &walkdata);
+        let errors = walkdata.errors.lock().unwrap();
+        assert!(
+            errors
+                .not_a_directory
+                .contains(&sock.to_string_lossy().into_owned()),
+            "expected not_a_directory to contain {sock:?}, got {:?}",
+            errors.not_a_directory
+        );
+        assert!(
+            !errors
+                .file_not_found
+                .contains(&sock.to_string_lossy().into_owned())
+        );
+        assert!(
+            errors
+                .file_not_found
+                .contains(&dangling.to_string_lossy().into_owned()),
+            "expected file_not_found to contain {dangling:?}, got {:?}",
+            errors.file_not_found
+        );
+        assert!(
+            !errors
+                .not_a_directory
+                .contains(&dangling.to_string_lossy().into_owned())
         );
     }
 

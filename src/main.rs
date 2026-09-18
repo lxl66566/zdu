@@ -321,7 +321,15 @@ fn main() {
         let final_errors = walk_data.errors.lock().unwrap();
         print_any_errors(print_errors, &final_errors);
 
-        if tree.children.is_empty() && !final_errors.file_not_found.is_empty() {
+        // Exit 1 only when nothing was scanned and a root argument was
+        // unusable. not_a_directory/eintr_exhausted join file_not_found:
+        // an empty tree next to "successful" exit 0 hides the failure
+        // (BUG-17).
+        if tree.children.is_empty()
+            && !(final_errors.file_not_found.is_empty()
+                && final_errors.not_a_directory.is_empty()
+                && final_errors.eintr_exhausted.is_empty())
+        {
             process::exit(1)
         }
         print_output(
@@ -399,6 +407,27 @@ fn print_any_errors(print_errors: bool, final_errors: &RuntimeErrors) {
             .collect::<Vec<&str>>()
             .join(", ");
         eprintln!("No such file or directory: {err}");
+    }
+    if !final_errors.not_a_directory.is_empty() {
+        // BUG-17: exists but is neither a directory nor a regular file
+        // (FIFO/socket/device); must not be reported as "not found"
+        let err = final_errors
+            .not_a_directory
+            .iter()
+            .map(AsRef::as_ref)
+            .collect::<Vec<&str>>()
+            .join(", ");
+        eprintln!("Not a directory: {err}");
+    }
+    if !final_errors.eintr_exhausted.is_empty() {
+        // BUG-17: listing kept failing with EINTR after all retries
+        let err = final_errors
+            .eintr_exhausted
+            .iter()
+            .map(AsRef::as_ref)
+            .collect::<Vec<&str>>()
+            .join(", ");
+        eprintln!("Gave up listing after repeated interruptions (subtrees not counted): {err}");
     }
     if !final_errors.no_permissions.is_empty() {
         if print_errors {
