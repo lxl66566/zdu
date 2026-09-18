@@ -17,15 +17,15 @@ _zdu() {
     _arguments "${_arguments_options[@]}" : \
 '-d+[Depth to show]:DEPTH:_default' \
 '--depth=[Depth to show]:DEPTH:_default' \
-'-T+[Number of threads to use]:THREADS:_default' \
-'--threads=[Number of threads to use]:THREADS:_default' \
+'-T+[Number of threads to use]:NUMBER:_default' \
+'--threads=[Number of threads to use]:NUMBER:_default' \
 '--config=[Specify a config file to use]:FILE:_files' \
 '-n+[Display the '\''n'\'' largest entries. (Default is terminal_height)]:NUMBER:_default' \
 '--number-of-lines=[Display the '\''n'\'' largest entries. (Default is terminal_height)]:NUMBER:_default' \
 '*-X+[Exclude any file or directory with this path]:PATH:_files' \
 '*--ignore-directory=[Exclude any file or directory with this path]:PATH:_files' \
-'-I+[Exclude any file or directory with a regex matching that listed in this file, the file entries will be added to the ignore regexs provided by --invert_filter]:FILE:_files' \
-'--ignore-all-in-file=[Exclude any file or directory with a regex matching that listed in this file, the file entries will be added to the ignore regexs provided by --invert_filter]:FILE:_files' \
+'-I+[Exclude any file or directory with a regex matching that listed in this file, the file entries will be added to the ignore regexs provided by --invert_filter. Blank lines and lines starting with '\''#'\'' are skipped]:FILE:_files' \
+'--ignore-all-in-file=[Exclude any file or directory with a regex matching that listed in this file, the file entries will be added to the ignore regexs provided by --invert_filter. Blank lines and lines starting with '\''#'\'' are skipped]:FILE:_files' \
 '-z+[Minimum size file to include in output]:MIN_SIZE:_default' \
 '--min-size=[Minimum size file to include in output]:MIN_SIZE:_default' \
 '(-e --filter -t --file-types)*-v+[Exclude filepaths matching this regex. To ignore png files type\: -v "\\.png\$"]:REGEX:_default' \
