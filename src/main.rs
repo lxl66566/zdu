@@ -128,6 +128,22 @@ fn main() {
         eprintln!("Warning: config sets both files0-from and files-from; using files0-from");
     }
 
+    // BUG-6's clap conflicts cannot see the config file, so a config
+    // files-from used to silently drop positional params with exit 0: the
+    // scanned roots then have nothing to do with what the user just typed.
+    // GNU du rejects the same combination on the CLI ("extra operand"), so
+    // fail fast here too. One-run override: pass --files-from/--files0-from
+    // explicitly (they take precedence over the config, BUG-5) or drop the
+    // config key.
+    if files_from_config_conflicts_with_params(&config, &options) {
+        eprintln!(
+            "positional arguments cannot be combined with files-from/files0-from set in the \
+             config file (the arguments would be ignored); pass --files-from/--files0-from to \
+             override the config for this run, or remove the config key"
+        );
+        process::exit(1);
+    }
+
     let target_dirs = if let Some(path) = config.get_files0_from(&options) {
         read_paths_from_source(&path, true)
     } else if let Some(path) = config.get_files_from(&options) {
@@ -524,6 +540,56 @@ fn init_rayon(threads: Option<&usize>) -> rayon::ThreadPool {
     }
     builder.build().unwrap_or_else(|err| {
         eprintln!("Problem initializing rayon, try: export RAYON_NUM_THREADS=1");
-        panic!("{err}");
+        panic!("{err}")
     })
+}
+
+// True when the effective files-from source is the config (CLI gave neither
+// flag) and positional params were also passed. A CLI flag pair with params
+// never gets this far: clap rejects it first.
+fn files_from_config_conflicts_with_params(config: &Config, options: &Cli) -> bool {
+    options.files0_from.is_none()
+        && options.files_from.is_none()
+        && options.params.as_ref().is_some_and(|p| !p.is_empty())
+        && (config.files0_from.is_some() || config.files_from.is_some())
+}
+
+#[cfg(test)]
+mod tests {
+    use clap::Parser;
+
+    use super::*;
+
+    #[test]
+    fn test_files_from_config_conflicts_with_params() {
+        let with_params = || Cli::parse_from(["zdu", "some/dir"]);
+        let without_params = || Cli::parse_from(["zdu"]);
+
+        // Either config key plus params is the silent-drop conflict
+        for config in [
+            Config {
+                files_from: Some("list.txt".to_owned()),
+                ..Default::default()
+            },
+            Config {
+                files0_from: Some("list0.txt".to_owned()),
+                ..Default::default()
+            },
+        ] {
+            assert!(files_from_config_conflicts_with_params(
+                &config,
+                &with_params()
+            ));
+            assert!(!files_from_config_conflicts_with_params(
+                &config,
+                &without_params()
+            ));
+        }
+
+        // No config files-from: params are simply the roots
+        assert!(!files_from_config_conflicts_with_params(
+            &Config::default(),
+            &with_params()
+        ));
+    }
 }
