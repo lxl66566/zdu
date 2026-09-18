@@ -79,6 +79,11 @@ pub struct RuntimeErrors {
     pub no_permissions: HashSet<String>,
     pub file_not_found: HashSet<String>,
     pub unknown_error: HashSet<String>,
+    // BUG-13: entries whose stat failed (e.g. directory renamed/deleted
+    // between readdir and stat). The walker still walks their subtree but
+    // cannot build a Node for them; without this bucket the finished
+    // subtree vanished from the totals with zero indication.
+    pub metadata_unavailable: HashSet<String>,
     pub interrupted_error: i32,
 }
 
