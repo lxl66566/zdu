@@ -24,7 +24,10 @@ jobs:
         shell: bash
         run: |
           cargo build
-          src="$(ls -dt target/debug/build/zdu-rs/*/out/share | head -n1)"
+          # find -path matches both cargo build-script layouts: stable
+          # "zdu-rs-<hash>/out" and nightly "zdu-rs/<hash>/out"; a glob on the
+          # bare package name only matches the latter.
+          src="$(find target/debug/build -type d -name share -path '*/out/share' | head -n1)"
           test -n "$src"
           cp -r "$src" share
       - name: release rust project
