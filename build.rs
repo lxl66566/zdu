@@ -39,7 +39,14 @@ fn main() -> Result<(), Error> {
     let fish_dir = root.join("share/fish/vendor_completions.d");
     let elvish_dir = root.join("share/elvish/lib");
     let ps_dir = root.join("share/powershell/completions");
-    for dir in [&man_dir, &bash_dir, &zsh_dir, &fish_dir, &elvish_dir, &ps_dir] {
+    for dir in [
+        &man_dir,
+        &bash_dir,
+        &zsh_dir,
+        &fish_dir,
+        &elvish_dir,
+        &ps_dir,
+    ] {
         fs::create_dir_all(dir)?;
     }
 
