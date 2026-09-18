@@ -3,7 +3,7 @@ complete -c zdu -s T -l threads -d 'Number of threads to use' -r
 complete -c zdu -l config -d 'Specify a config file to use' -r -F
 complete -c zdu -s n -l number-of-lines -d 'Display the \'n\' largest entries. (Default is terminal_height)' -r
 complete -c zdu -s X -l ignore-directory -d 'Exclude any file or directory with this path' -r -F
-complete -c zdu -s I -l ignore-all-in-file -d 'Exclude any file or directory with a regex matching that listed in this file, the file entries will be added to the ignore regexs provided by --invert_filter' -r -F
+complete -c zdu -s I -l ignore-all-in-file -d 'Exclude any file or directory with a regex matching that listed in this file, the file entries will be added to the ignore regexs provided by --invert_filter. Blank lines and lines starting with \'#\' are skipped' -r -F
 complete -c zdu -s z -l min-size -d 'Minimum size file to include in output' -r
 complete -c zdu -s v -l invert-filter -d 'Exclude filepaths matching this regex. To ignore png files type: -v "\\.png$"' -r
 complete -c zdu -s e -l filter -d 'Only include filepaths matching this regex. For png files type: -e "\\.png$"' -r

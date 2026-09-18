@@ -12,7 +12,7 @@ Like du but more intuitive
 \fB\-d\fR, \fB\-\-depth\fR \fI<DEPTH>\fR
 Depth to show
 .TP
-\fB\-T\fR, \fB\-\-threads\fR \fI<THREADS>\fR
+\fB\-T\fR, \fB\-\-threads\fR \fI<NUMBER>\fR
 Number of threads to use
 .TP
 \fB\-\-config\fR \fI<FILE>\fR
@@ -28,7 +28,7 @@ Subdirectories will not have their path shortened
 Exclude any file or directory with this path
 .TP
 \fB\-I\fR, \fB\-\-ignore\-all\-in\-file\fR \fI<FILE>\fR
-Exclude any file or directory with a regex matching that listed in this file, the file entries will be added to the ignore regexs provided by \-\-invert_filter
+Exclude any file or directory with a regex matching that listed in this file, the file entries will be added to the ignore regexs provided by \-\-invert_filter. Blank lines and lines starting with \*(Aq#\*(Aq are skipped
 .TP
 \fB\-L\fR, \fB\-\-dereference\-links\fR
 dereference sym links \- Treat sym links as directories and go into them

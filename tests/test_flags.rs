@@ -160,6 +160,20 @@ pub fn test_ignore_all_in_file() {
 }
 
 #[test]
+pub fn test_ignore_all_in_file_skips_blank_and_comment_lines() {
+    // BUG-8 regression: a blank line compiled to an empty regex matching
+    // every path, zeroing the whole tree; '#hello_file' doubles as a check
+    // that comment lines are skipped (as a regex it would hide hello_file)
+    let tmp = tempfile::tempdir().unwrap();
+    let ig = tmp.path().join("ig.txt");
+    std::fs::write(&ig, "#hello_file\n\n   \nmatch_nothing_zzz\n").unwrap();
+
+    let output = build_command(vec!["-c", "-I", ig.to_str().unwrap(), "tests/test_dir/"]);
+    assert!(output.contains("hello_file"), "{output}");
+    assert!(output.contains("a_file"), "{output}");
+}
+
+#[test]
 pub fn test_files_from_flag_file() {
     let output = build_command(vec![
         "--files-from",
@@ -177,6 +191,49 @@ pub fn test_files0_from_flag_file() {
     ]);
     assert!(output.contains("a_file"));
     assert!(output.contains("hello_file"));
+}
+
+#[test]
+pub fn test_cli_files_from_beats_config_files0_from() {
+    // BUG-5 regression: a config files0-from used to silently override an
+    // explicit CLI --files-from
+    let tmp = tempfile::tempdir().unwrap();
+    let dir_a = tmp.path().join("dir_a");
+    let dir_b = tmp.path().join("dir_b");
+    std::fs::create_dir_all(&dir_a).unwrap();
+    std::fs::create_dir_all(&dir_b).unwrap();
+    std::fs::write(dir_a.join("marker_a.txt"), b"a").unwrap();
+    std::fs::write(dir_b.join("marker_b.txt"), b"b").unwrap();
+
+    let list0 = tmp.path().join("list0.txt");
+    let list = tmp.path().join("list.txt");
+    std::fs::write(&list0, format!("{}\0", dir_a.to_string_lossy())).unwrap();
+    std::fs::write(&list, format!("{}\n", dir_b.to_string_lossy())).unwrap();
+    let cfg = tmp.path().join("zdu.toml");
+    // forward slashes: backslashes are escapes in basic TOML strings
+    std::fs::write(
+        &cfg,
+        format!(
+            "files0-from = \"{}\"\n",
+            list0.to_string_lossy().replace('\\', "/")
+        ),
+    )
+    .unwrap();
+
+    // Explicit CLI --files-from must win over the config files0-from
+    let output = build_command(vec![
+        "--config",
+        cfg.to_str().unwrap(),
+        "--files-from",
+        list.to_str().unwrap(),
+    ]);
+    assert!(output.contains("marker_b"), "{output}");
+    assert!(!output.contains("marker_a"), "{output}");
+
+    // With no CLI flag, the config files0-from still applies
+    let output = build_command(vec!["--config", cfg.to_str().unwrap()]);
+    assert!(output.contains("marker_a"), "{output}");
+    assert!(!output.contains("marker_b"), "{output}");
 }
 
 #[test]
@@ -234,6 +291,53 @@ pub fn test_files0_from_flag_stdin() {
     let output = str::from_utf8(&finished.stdout).unwrap();
     assert!(output.contains("a_file"));
     assert!(output.contains("hello_file"));
+}
+
+#[test]
+pub fn test_files_from_missing_file_exits_nonzero() {
+    // BUG-7 regression: an unreadable --files-from target used to warn and
+    // then silently scan the whole cwd with exit 0
+    let mut cmd = cargo_bin_cmd!("zdu");
+    cmd.arg("-P")
+        .arg("--files-from")
+        .arg("no_such_files_from_list.txt");
+    let output_error = cmd.unwrap_err();
+    let result = output_error.as_output().unwrap();
+    assert_eq!(result.status.code(), Some(1));
+    let stderr = str::from_utf8(&result.stderr).unwrap();
+    assert!(stderr.contains("Failed to read paths from"), "{stderr}");
+}
+
+#[test]
+pub fn test_files_from_stdin_invalid_utf8_exits_nonzero() {
+    // BUG-7: non-UTF-8 stdin used to be misreported as "No files provided"
+    // and fall back to scanning the cwd
+    let mut cmd = cargo_bin_cmd!("zdu");
+    cmd.arg("-P").arg("--files-from").arg("-");
+    cmd.write_stdin(b"\xff\xfe\x00");
+    let output_error = cmd.unwrap_err();
+    let result = output_error.as_output().unwrap();
+    assert_eq!(result.status.code(), Some(1));
+    let stderr = str::from_utf8(&result.stderr).unwrap();
+    // Utf8Error's Display message is lowercase
+    assert!(stderr.contains("invalid utf-8"), "{stderr}");
+}
+
+#[test]
+pub fn test_files_from_empty_input_scans_nothing() {
+    // BUG-7: empty stdin must not fall back to scanning the cwd (GNU du
+    // scans nothing and exits 0 in this case too)
+    let cwd_entries = std::fs::read_dir(".").unwrap().count();
+    assert!(cwd_entries > 0, "test must run in a non-empty cwd");
+
+    let mut cmd = cargo_bin_cmd!("zdu");
+    cmd.arg("-P").arg("-c").arg("--files-from").arg("-");
+    cmd.write_stdin(b"");
+    let output = cmd.unwrap();
+    assert_eq!(output.status.code(), Some(0));
+    let stdout = str::from_utf8(&output.stdout).unwrap();
+    assert!(!stdout.contains("src"), "{stdout}");
+    assert!(!stdout.contains("test_dir"), "{stdout}");
 }
 
 #[test]
@@ -492,6 +596,21 @@ pub fn test_json_with_filetime_outputs_integer_timestamp() {
     );
     // Sanity: decodes to a plausible unix timestamp
     assert!(json["size"].as_i64().unwrap() > 1_000_000_000);
+}
+
+#[test]
+pub fn test_invalid_cli_regex_exits_with_clear_message() {
+    // BUG-9 regression: the message said "Ignoring bad value" while the
+    // process actually terminated; wording must match the fatal behavior
+    // (-I ignore-file lines are the ones that get skipped with a warning)
+    let mut cmd = cargo_bin_cmd!("zdu");
+    cmd.arg("-P").arg("-v").arg("[").arg("tests/test_dir");
+    let output_error = cmd.unwrap_err();
+    let result = output_error.as_output().unwrap();
+    assert_eq!(result.status.code(), Some(1));
+    let stderr = str::from_utf8(&result.stderr).unwrap();
+    assert!(stderr.contains("Invalid regex"), "{stderr}");
+    assert!(!stderr.contains("Ignoring"), "{stderr}");
 }
 
 #[test]

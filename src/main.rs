@@ -97,8 +97,11 @@ fn get_regex_value(maybe_value: Option<&Vec<String>>) -> Vec<Regex> {
         .unwrap_or(&Vec::new())
         .iter()
         .map(|reg| {
+            // Unlike a bad line in an -I ignore file (skipped with a
+            // warning), an invalid CLI regex is fatal; the message must
+            // say so instead of claiming the value is ignored
             Regex::new(reg).unwrap_or_else(|err| {
-                eprintln!("Ignoring bad value for regex {err:?}");
+                eprintln!("Invalid regex {reg:?}: {err}; exiting");
                 process::exit(1)
             })
         })
@@ -181,7 +184,17 @@ fn main() {
 
     let ignore_from_file_result = match options.ignore_all_in_file {
         Some(ref val) => match read_to_string(val) {
-            Ok(content) => content.lines().map(Regex::new).collect::<Vec<_>>(),
+            // BUG-8: a blank line compiles to an empty regex that matches
+            // every path, zeroing the whole tree via the invert filter;
+            // skip blank lines and '#' comments like gitignore does
+            Ok(content) => content
+                .lines()
+                .filter(|line| {
+                    let trimmed = line.trim_start();
+                    !trimmed.is_empty() && !trimmed.starts_with('#')
+                })
+                .map(Regex::new)
+                .collect::<Vec<_>>(),
             Err(e) => {
                 eprintln!("Failed to read ignore file '{val}': {e}");
                 process::exit(1)
@@ -416,48 +429,39 @@ fn print_any_errors(print_errors: bool, final_errors: &RuntimeErrors) {
 fn read_paths_from_source(path: &str, null_terminated: bool) -> Vec<String> {
     let from_stdin = path == "-";
 
-    let result: Result<Vec<String>, Option<String>> = (|| {
-        // 1) read bytes
-        let bytes = if from_stdin {
-            let mut b = Vec::new();
-            io::stdin().lock().read_to_end(&mut b).map_err(|_| None)?;
-            b
-        } else {
-            read(path).map_err(|e| Some(e.to_string()))?
-        };
+    // Fatal on real read/decode failures: GNU du also exits 1 when it cannot
+    // read its file list, and falling back to scanning the cwd turns a
+    // typo into an unbounded scan with a misleading result.
+    let bytes = if from_stdin {
+        let mut b = Vec::new();
+        io::stdin()
+            .lock()
+            .read_to_end(&mut b)
+            .unwrap_or_else(|e| exit_read_error(path, e));
+        b
+    } else {
+        read(path).unwrap_or_else(|e| exit_read_error(path, e))
+    };
 
-        let text = std::str::from_utf8(&bytes).map_err(|e| {
-            if from_stdin {
-                None
-            } else {
-                Some(e.to_string())
-            }
-        })?;
-        let items: Vec<String> = if null_terminated {
-            text.split('\0')
-                .filter(|s| !s.is_empty())
-                .map(str::to_owned)
-                .collect()
-        } else {
-            text.lines().map(str::to_owned).collect()
-        };
-        if from_stdin && items.is_empty() {
-            return Err(None);
-        }
-        Ok(items)
-    })();
+    // Invalid UTF-8 is a decode failure of the requested input, fatal even
+    // on stdin (it used to be misreported as "No files provided")
+    let text = std::str::from_utf8(&bytes).unwrap_or_else(|e| exit_read_error(path, e));
 
-    match result {
-        Ok(v) => v,
-        Err(None) => {
-            eprintln!("No files provided, defaulting to current directory");
-            vec![".".to_owned()]
-        },
-        Err(Some(msg)) => {
-            eprintln!("Failed to read file: {msg}");
-            vec![".".to_owned()]
-        },
+    if null_terminated {
+        text.split('\0')
+            .filter(|s| !s.is_empty())
+            .map(str::to_owned)
+            .collect()
+    } else {
+        text.lines().map(str::to_owned).collect()
     }
+    // An empty source yields no roots; like GNU du, do not silently fall
+    // back to the cwd (get_biggest renders an empty total and we exit 0)
+}
+
+fn exit_read_error(path: &str, msg: impl std::fmt::Display) -> ! {
+    eprintln!("Failed to read paths from '{path}': {msg}");
+    process::exit(1)
 }
 
 fn init_rayon(threads: Option<&usize>) -> rayon::ThreadPool {

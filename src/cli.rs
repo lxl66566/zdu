@@ -20,7 +20,14 @@ pub struct Cli {
     pub depth: Option<usize>,
 
     /// Number of threads to use
-    #[arg(short('T'), long)]
+    // rayon treats 0 as "default count"; require an explicit positive
+    // value instead of silently reinterpreting it (BUG-10)
+    #[arg(
+        short('T'),
+        long,
+        value_name("NUMBER"),
+        value_parser = clap::builder::RangedI64ValueParser::<usize>::new().range(1..)
+    )]
     pub threads: Option<usize>,
 
     /// Specify a config file to use
@@ -41,7 +48,7 @@ pub struct Cli {
 
     /// Exclude any file or directory with a regex matching that listed in this
     /// file, the file entries will be added to the ignore regexs provided by
-    /// --invert_filter
+    /// --invert_filter. Blank lines and lines starting with '#' are skipped
     #[arg(short('I'), long, value_name("FILE"), value_hint(ValueHint::FilePath))]
     pub ignore_all_in_file: Option<String>,
 
@@ -177,7 +184,13 @@ pub struct Cli {
     pub stack_size: Option<usize>,
 
     /// Input files or directories.
-    #[arg(value_name("PATH"), value_hint(ValueHint::AnyPath))]
+    // GNU du rejects this combination as "extra operand"; silently dropping
+    // the positional paths (the old behavior) loses user data unnoticed
+    #[arg(
+        value_name("PATH"),
+        value_hint(ValueHint::AnyPath),
+        conflicts_with_all(["files_from", "files0_from"])
+    )]
     pub params: Option<Vec<String>>,
 
     /// Output the directory tree as json to the current directory
@@ -301,5 +314,24 @@ mod tests {
         assert!(Cli::try_parse_from(["zdu", "-w", "10000"]).is_ok());
         assert!(Cli::try_parse_from(["zdu", "-w", "10001"]).is_err());
         assert!(Cli::try_parse_from(["zdu", "-w", "100000000000000000"]).is_err());
+    }
+
+    #[test]
+    fn params_conflict_with_files_from_flags() {
+        // BUG-6 regression: positional paths next to --files-from were
+        // silently dropped instead of being rejected
+        assert!(Cli::try_parse_from(["zdu", "dir", "--files-from", "f.txt"]).is_err());
+        assert!(Cli::try_parse_from(["zdu", "dir", "--files0-from", "f.txt"]).is_err());
+        assert!(Cli::try_parse_from(["zdu", "--files-from", "f.txt", "dir"]).is_err());
+        assert!(Cli::try_parse_from(["zdu", "--files-from", "f.txt"]).is_ok());
+        assert!(Cli::try_parse_from(["zdu", "dir", "dir2"]).is_ok());
+    }
+
+    #[test]
+    fn threads_must_be_positive() {
+        // BUG-10: -T 0 silently meant rayon's default thread count
+        assert!(Cli::try_parse_from(["zdu", "-T", "1"]).is_ok());
+        assert!(Cli::try_parse_from(["zdu", "-T", "0"]).is_err());
+        assert!(Cli::try_parse_from(["zdu", "--threads", "0"]).is_err());
     }
 }
