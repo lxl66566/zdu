@@ -17,12 +17,6 @@ pub struct Node {
     pub name: PathBuf,
     pub size: u64,
     pub children: Vec<Node>,
-    // Only ever assigned, never read: the walk dedups through its own
-    // InodeSet, not through this field. Kept for future per-node identity
-    // features (PERF-8 note: it used to be copied in the duplicate-name
-    // rename path, which masked the dead_code lint).
-    #[allow(dead_code)]
-    pub inode_device: Option<(u64, u64)>,
     pub depth: usize,
     // PERF-3: the walker already knows this; storing it avoids a per-node
     // stat in -t extension aggregation and filter post-processing
@@ -86,8 +80,6 @@ pub fn build_node(
     let by_filetime = &walk_data.by_filetime;
 
     metadata.map(|data| {
-        let inode_device = data.1;
-
         let filtered_out = !already_filtered && {
             let regex_or_time_filtered = is_filtered_out_due_to_regex(walk_data.filter_regex, &dir)
                 || is_filtered_out_due_to_invert_regex(walk_data.invert_filter_regex, &dir)
@@ -122,7 +114,6 @@ pub fn build_node(
             name: dir,
             size,
             children,
-            inode_device,
             depth,
             is_file,
         }
@@ -215,12 +206,10 @@ mod tests {
                     name: PathBuf::from("c"),
                     size: s,
                     children: vec![],
-                    inode_device: None,
                     depth: 1,
                     is_file: true,
                 })
                 .collect(),
-            inode_device: None,
             depth: 0,
             is_file: false,
         };

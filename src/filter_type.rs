@@ -118,7 +118,6 @@ mod tests {
             name: PathBuf::from(name),
             size,
             children: vec![],
-            inode_device: None,
             depth: 1,
             is_file: true,
         }

@@ -63,7 +63,6 @@ fn total_node_builder(size: u64, children: Vec<Node>) -> Node {
         name: PathBuf::from("(total)"),
         size,
         children,
-        inode_device: None,
         depth: 0,
         is_file: false,
     }
@@ -232,7 +231,6 @@ mod tests {
             name: PathBuf::from(name),
             size,
             children: vec![],
-            inode_device: None,
             depth: 1,
             is_file,
         }

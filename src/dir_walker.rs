@@ -1121,7 +1121,6 @@ pub(crate) mod tests {
             name: tmp.path().join("child.txt"),
             size: 42,
             children: vec![],
-            inode_device: None,
             depth: 1,
             is_file: true,
         };
