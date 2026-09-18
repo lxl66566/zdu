@@ -20,7 +20,14 @@ pub struct Cli {
     pub depth: Option<usize>,
 
     /// Number of threads to use
-    #[arg(short('T'), long)]
+    // rayon treats 0 as "default count"; require an explicit positive
+    // value instead of silently reinterpreting it (BUG-10)
+    #[arg(
+        short('T'),
+        long,
+        value_name("NUMBER"),
+        value_parser = clap::builder::RangedI64ValueParser::<usize>::new().range(1..)
+    )]
     pub threads: Option<usize>,
 
     /// Specify a config file to use
@@ -317,5 +324,13 @@ mod tests {
         assert!(Cli::try_parse_from(["zdu", "--files-from", "f.txt", "dir"]).is_err());
         assert!(Cli::try_parse_from(["zdu", "--files-from", "f.txt"]).is_ok());
         assert!(Cli::try_parse_from(["zdu", "dir", "dir2"]).is_ok());
+    }
+
+    #[test]
+    fn threads_must_be_positive() {
+        // BUG-10: -T 0 silently meant rayon's default thread count
+        assert!(Cli::try_parse_from(["zdu", "-T", "1"]).is_ok());
+        assert!(Cli::try_parse_from(["zdu", "-T", "0"]).is_err());
+        assert!(Cli::try_parse_from(["zdu", "--threads", "0"]).is_err());
     }
 }
