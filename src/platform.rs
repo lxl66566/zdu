@@ -200,6 +200,17 @@ fn get_metadata_expensive(
     let h = Handle::from_file(file);
     let info = information(&h).ok()?;
 
+    // BUG-15: winapi_util leaves the timestamps Option::None on some
+    // network/virtual filesystems; unwrapping panicked inside a rayon worker
+    // and poisoned every lock().unwrap() downstream. Fall back to 0 (= a
+    // pre-epoch sentinel) instead of losing the whole entry.
+    let times = (
+        filetime_to_unix_seconds(info.last_write_time().unwrap_or(0)),
+        filetime_to_unix_seconds(info.last_access_time().unwrap_or(0)),
+        filetime_to_unix_seconds(info.creation_time().unwrap_or(0)),
+    );
+    let id = Some((info.file_index(), info.volume_serial_number()));
+
     // BUG-3 (inherited from upstream dust, which swaps the two kinds):
     // apparent size (-s) is the logical file size; the default (allocated)
     // mode is the on-disk size via GetCompressedFileSizeW, which is
@@ -208,26 +219,10 @@ fn get_metadata_expensive(
     // cluster-rounded allocation size without opening a handle, so Windows
     // "allocated" deliberately means "bytes actually stored", not blocks.
     if use_apparent_size {
-        Some((
-            info.file_size(),
-            Some((info.file_index(), info.volume_serial_number())),
-            (
-                filetime_to_unix_seconds(info.last_write_time().unwrap()),
-                filetime_to_unix_seconds(info.last_access_time().unwrap()),
-                filetime_to_unix_seconds(info.creation_time().unwrap()),
-            ),
-        ))
+        Some((info.file_size(), id, times))
     } else {
         use filesize::PathExt;
-        Some((
-            path.size_on_disk().ok()?,
-            Some((info.file_index(), info.volume_serial_number())),
-            (
-                filetime_to_unix_seconds(info.last_write_time().unwrap()),
-                filetime_to_unix_seconds(info.last_access_time().unwrap()),
-                filetime_to_unix_seconds(info.creation_time().unwrap()),
-            ),
-        ))
+        Some((path.size_on_disk().ok()?, id, times))
     }
 }
 
