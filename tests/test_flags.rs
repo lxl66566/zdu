@@ -280,6 +280,53 @@ pub fn test_files0_from_flag_stdin() {
 }
 
 #[test]
+pub fn test_files_from_missing_file_exits_nonzero() {
+    // BUG-7 regression: an unreadable --files-from target used to warn and
+    // then silently scan the whole cwd with exit 0
+    let mut cmd = cargo_bin_cmd!("zdu");
+    cmd.arg("-P")
+        .arg("--files-from")
+        .arg("no_such_files_from_list.txt");
+    let output_error = cmd.unwrap_err();
+    let result = output_error.as_output().unwrap();
+    assert_eq!(result.status.code(), Some(1));
+    let stderr = str::from_utf8(&result.stderr).unwrap();
+    assert!(stderr.contains("Failed to read paths from"), "{stderr}");
+}
+
+#[test]
+pub fn test_files_from_stdin_invalid_utf8_exits_nonzero() {
+    // BUG-7: non-UTF-8 stdin used to be misreported as "No files provided"
+    // and fall back to scanning the cwd
+    let mut cmd = cargo_bin_cmd!("zdu");
+    cmd.arg("-P").arg("--files-from").arg("-");
+    cmd.write_stdin(b"\xff\xfe\x00");
+    let output_error = cmd.unwrap_err();
+    let result = output_error.as_output().unwrap();
+    assert_eq!(result.status.code(), Some(1));
+    let stderr = str::from_utf8(&result.stderr).unwrap();
+    // Utf8Error's Display message is lowercase
+    assert!(stderr.contains("invalid utf-8"), "{stderr}");
+}
+
+#[test]
+pub fn test_files_from_empty_input_scans_nothing() {
+    // BUG-7: empty stdin must not fall back to scanning the cwd (GNU du
+    // scans nothing and exits 0 in this case too)
+    let cwd_entries = std::fs::read_dir(".").unwrap().count();
+    assert!(cwd_entries > 0, "test must run in a non-empty cwd");
+
+    let mut cmd = cargo_bin_cmd!("zdu");
+    cmd.arg("-P").arg("-c").arg("--files-from").arg("-");
+    cmd.write_stdin(b"");
+    let output = cmd.unwrap();
+    assert_eq!(output.status.code(), Some(0));
+    let stdout = str::from_utf8(&output.stdout).unwrap();
+    assert!(!stdout.contains("src"), "{stdout}");
+    assert!(!stdout.contains("test_dir"), "{stdout}");
+}
+
+#[test]
 pub fn test_with_bad_param() {
     let mut cmd = cargo_bin_cmd!("zdu");
     cmd.arg("-P").arg("bad_place");

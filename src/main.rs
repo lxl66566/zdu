@@ -416,48 +416,39 @@ fn print_any_errors(print_errors: bool, final_errors: &RuntimeErrors) {
 fn read_paths_from_source(path: &str, null_terminated: bool) -> Vec<String> {
     let from_stdin = path == "-";
 
-    let result: Result<Vec<String>, Option<String>> = (|| {
-        // 1) read bytes
-        let bytes = if from_stdin {
-            let mut b = Vec::new();
-            io::stdin().lock().read_to_end(&mut b).map_err(|_| None)?;
-            b
-        } else {
-            read(path).map_err(|e| Some(e.to_string()))?
-        };
+    // Fatal on real read/decode failures: GNU du also exits 1 when it cannot
+    // read its file list, and falling back to scanning the cwd turns a
+    // typo into an unbounded scan with a misleading result.
+    let bytes = if from_stdin {
+        let mut b = Vec::new();
+        io::stdin()
+            .lock()
+            .read_to_end(&mut b)
+            .unwrap_or_else(|e| exit_read_error(path, e));
+        b
+    } else {
+        read(path).unwrap_or_else(|e| exit_read_error(path, e))
+    };
 
-        let text = std::str::from_utf8(&bytes).map_err(|e| {
-            if from_stdin {
-                None
-            } else {
-                Some(e.to_string())
-            }
-        })?;
-        let items: Vec<String> = if null_terminated {
-            text.split('\0')
-                .filter(|s| !s.is_empty())
-                .map(str::to_owned)
-                .collect()
-        } else {
-            text.lines().map(str::to_owned).collect()
-        };
-        if from_stdin && items.is_empty() {
-            return Err(None);
-        }
-        Ok(items)
-    })();
+    // Invalid UTF-8 is a decode failure of the requested input, fatal even
+    // on stdin (it used to be misreported as "No files provided")
+    let text = std::str::from_utf8(&bytes).unwrap_or_else(|e| exit_read_error(path, e));
 
-    match result {
-        Ok(v) => v,
-        Err(None) => {
-            eprintln!("No files provided, defaulting to current directory");
-            vec![".".to_owned()]
-        },
-        Err(Some(msg)) => {
-            eprintln!("Failed to read file: {msg}");
-            vec![".".to_owned()]
-        },
+    if null_terminated {
+        text.split('\0')
+            .filter(|s| !s.is_empty())
+            .map(str::to_owned)
+            .collect()
+    } else {
+        text.lines().map(str::to_owned).collect()
     }
+    // An empty source yields no roots; like GNU du, do not silently fall
+    // back to the cwd (get_biggest renders an empty total and we exit 0)
+}
+
+fn exit_read_error(path: &str, msg: impl std::fmt::Display) -> ! {
+    eprintln!("Failed to read paths from '{path}': {msg}");
+    process::exit(1)
 }
 
 fn init_rayon(threads: Option<&usize>) -> rayon::ThreadPool {
