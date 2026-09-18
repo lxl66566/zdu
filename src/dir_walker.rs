@@ -698,6 +698,16 @@ const MAX_EINTR_RETRIES: u32 = 999;
 // cannot seek past already-consumed entries.
 const MIN_PAR_ENTRIES: usize = 64;
 
+// PERF-8 (evaluated, kept as-is): the single global Mutex looks like a
+// serialization point next to InodeSet's shards, but it is not one in
+// practice. Every recorded error is preceded by a failed directory-open
+// syscall (microseconds), and the error count is bounded by the number of
+// unopenable directories in the tree (C:\Windows full scan: ~44). A
+// micro-benchmark of exactly this lock+insert+String work saturates at
+// ~1.37M errors/s under 32-thread contention (~731 ns/error), so even a
+// pathological 10k-error tree spends ~7 ms total here vs seconds of walk.
+// Sharding RuntimeErrors (4 locks, new public shape) or thread-local
+// aggregation (rayon lifetime + merge step) would be over-engineering.
 fn record_error(failed: &Error, dir: &Path, walk_data: &WalkData) {
     let mut editable_error = walk_data.errors.lock().unwrap();
     match failed.kind() {
