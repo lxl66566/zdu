@@ -30,12 +30,12 @@ Yet another fast, parallel `du` — the ease of use of [dust](https://github.com
 
 - Parallel tree walk (rayon)
 - Intuitive tree chart with percent bars
-- Default: no symlink follow; hard links counted once; `-L` to follow links with cycle-safe dedup
+- Default: no symlink follow; hard links counted once in the default (allocated) mode — `-s` counts every link; `-L` to follow links with cycle-safe dedup
 - `-x` stay on one filesystem, `-s` apparent size, `-f` count files, `-m` show file times
-- Windows default mode reports the on-disk size for sparse/cloud-placeholder files (where the file length is wildly off); plain and NTFS-compressed files report the file length, since du-style allocated size has no cheap per-file API on Windows
+- Windows default mode reports the on-disk size for sparse/cloud-placeholder files (where the file length is wildly off); plain and NTFS-compressed files report the file length, since du-style allocated size has no cheap per-file API on Windows — the free metadata carries no file ID either, so plain-file hard links count once per link (dedup needs an ID)
 - `-j` JSON output, `--files-from` / `--files0-from` path lists
 - Regex / file-type / min-size / time filters
-- Config file (`~/.config/zdu/config.toml`) for defaults
+- Config file (`~/.config/zdu/config.toml`, or `$XDG_CONFIG_HOME/zdu/config.toml`) for defaults
 
 ## Install
 
@@ -80,10 +80,10 @@ zdu renders a full tree chart (like dust) while pdu prints a flat sorted list, s
 | ----------------------- | ---------- | ------------------- | ------------------------------------------------- |
 | Output                  | tree chart | flat/sorted list    | tree chart (dust-style)                           |
 | Walker                  | parallel   | parallel, lock-free | parallel (rayon), no recursion                    |
-| Windows stat per entry  | yes        | yes                 | none (`DirEntry::metadata()` reuses readdir data) |
+| Windows stat per entry  | yes        | yes                 | none for plain entries (`DirEntry::metadata()` reuses readdir data) |
 | `-j` on non-UTF-8 names | panic      | —                   | lossy, never panics                               |
 
-zdu started as a port of dust v1.2.5 with multiple bug fixed, then adopted pdu's performance lessons.
+zdu started as a port of dust v1.2.5 with multiple bugs fixed, then adopted pdu's performance lessons.
 
 ## Attribution
 
