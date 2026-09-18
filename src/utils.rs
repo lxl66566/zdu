@@ -9,28 +9,27 @@ use regex::Regex;
 use crate::{config::DAY_SECONDS, dir_walker::Operator, platform};
 
 pub fn simplify_dir_names<P: AsRef<Path>>(dirs: &[P]) -> HashSet<PathBuf> {
-    let mut top_level_names: HashSet<PathBuf> = HashSet::with_capacity(dirs.len());
+    // PERF-1: the previous pairwise is_a_parent_of scan was O(n^2) — seconds
+    // of startup for 20k+ --files-from entries. Sort by components instead:
+    // a path and its whole subtree form one contiguous block in that order
+    // (every sequence between a prefix and its extensions must itself carry
+    // the prefix), so a single starts_with check against the last kept path
+    // removes every descendant, and the parent is kept.
+    let mut normalized: Vec<PathBuf> = dirs.iter().map(normalize_path).collect();
+    // Component order, not byte order: with byte order "a/b!x" ('!' < '/')
+    // would sort between "a/b" and its real children and break the scan
+    normalized.sort_by(|a, b| a.components().cmp(b.components()));
 
-    for t in dirs {
-        let top_level_name = normalize_path(t);
-        let mut can_add = true;
-        let mut to_remove: Vec<PathBuf> = Vec::new();
-
-        for tt in &top_level_names {
-            if is_a_parent_of(&top_level_name, tt) {
-                to_remove.push(tt.clone());
-            } else if is_a_parent_of(tt, &top_level_name) {
-                can_add = false;
-            }
-        }
-        for r in to_remove {
-            top_level_names.remove(&r);
-        }
-        if can_add {
-            top_level_names.insert(top_level_name);
+    let mut top_level_names = HashSet::with_capacity(normalized.len());
+    let mut last_kept: Option<&Path> = None;
+    for path in &normalized {
+        // Equal duplicates also start_with themselves and are dropped
+        let is_descendant = matches!(last_kept, Some(kept) if path.starts_with(kept));
+        if !is_descendant {
+            last_kept = Some(path.as_path());
+            top_level_names.insert(path.clone());
         }
     }
-
     top_level_names
 }
 
@@ -110,6 +109,9 @@ pub fn is_filtered_out_due_to_invert_regex(filter_regex: &[Regex], dir: &Path) -
         .any(|f| f.is_match(&dir.as_os_str().to_string_lossy()))
 }
 
+// Production code no longer calls this (see simplify_dir_names); kept as
+// the documented parent-of semantics for the reference cross-check below
+#[cfg(test)]
 fn is_a_parent_of<P: AsRef<Path>>(parent: P, child: P) -> bool {
     let parent = parent.as_ref();
     let child = child.as_ref();
@@ -176,6 +178,78 @@ mod tests {
         correct.insert(PathBuf::from("src"));
         correct.insert(PathBuf::from("src_v2"));
         assert_eq!(simplify_dir_names(&["src/", "src_v2"]), correct);
+    }
+
+    #[test]
+    fn test_simplify_dir_byte_order_trap() {
+        // "a/b!x" must not be mistaken for a child of "a/b", and "a/b/c"
+        // must still be dropped even with "a/b!x" sorting in between under
+        // byte order
+        let mut correct = HashSet::new();
+        correct.insert(PathBuf::from("a/b"));
+        correct.insert(PathBuf::from("a/b!x"));
+        correct.insert(PathBuf::from("z"));
+        assert_eq!(
+            simplify_dir_names(&["a/b/c", "a/b!x", "a/b", "z", "a/b/d/e"]),
+            correct
+        );
+    }
+
+    // The original O(n^2) algorithm, kept to cross-check the sorted scan
+    #[cfg(test)]
+    fn simplify_dir_names_reference<P: AsRef<Path>>(dirs: &[P]) -> HashSet<PathBuf> {
+        let mut top_level_names: HashSet<PathBuf> = HashSet::with_capacity(dirs.len());
+
+        for t in dirs {
+            let top_level_name = normalize_path(t);
+            let mut can_add = true;
+            let mut to_remove: Vec<PathBuf> = Vec::new();
+
+            for tt in &top_level_names {
+                if is_a_parent_of(&top_level_name, tt) {
+                    to_remove.push(tt.clone());
+                } else if is_a_parent_of(tt, &top_level_name) {
+                    can_add = false;
+                }
+            }
+            for r in to_remove {
+                top_level_names.remove(&r);
+            }
+            if can_add {
+                top_level_names.insert(top_level_name);
+            }
+        }
+
+        top_level_names
+    }
+
+    #[test]
+    fn test_simplify_dir_matches_reference_on_random_inputs() {
+        // PERF-1 equivalence check; deterministic xorshift so failures
+        // reproduce without a rand dependency
+        let mut state = 0x2545_f491_4f6c_dd1d_u64;
+        let mut next = move || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state
+        };
+        let pool = [
+            "a", "b", "c", "bb", "a/b", "a/b!x", "a/b/c", "a/bc", "x", "x/y", "x/y/z", "src",
+            "src_v2", "src/v2", "a/./b", "a//b", "/a", "/a/b",
+        ];
+        let pool_len = u64::try_from(pool.len()).unwrap();
+        for round in 0..500 {
+            let count = usize::try_from(next() % 12).unwrap() + 1;
+            let dirs: Vec<String> = (0..count)
+                .map(|_| pool[usize::try_from(next() % pool_len).unwrap()].to_owned())
+                .collect();
+            assert_eq!(
+                simplify_dir_names(&dirs),
+                simplify_dir_names_reference(&dirs),
+                "round {round}: {dirs:?}"
+            );
+        }
     }
 
     #[test]
