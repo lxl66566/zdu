@@ -127,13 +127,15 @@ fn always_add_children<'a>(
                 Some(ms) => c.size > ms as u64,
                 None => !display_data.using_a_filter || c.is_file || c.size > 0,
             })
-            .filter(|c| {
-                if display_data.only_dir {
-                    c.name.is_dir()
-                } else {
-                    true
-                }
-            }),
+            // PERF-4: classify from the walker-known is_file instead of a
+            // follow-stat per node (and its TOCTOU). Semantic change: -D now
+            // keeps non-regular entries, so symlinks (including dangling
+            // ones and links to files) appear where the old is_dir() dropped
+            // them. Under -L a symlink to a dir was already kept (and walked
+            // as one), so nothing changes there. This matches zdu's own -L
+            // interpretation and avoids re-stat-ing every node; upstream
+            // dust still uses follow-semantic is_dir() here.
+            .filter(|c| !display_data.only_dir || !c.is_file),
     );
     heap
 }
@@ -226,5 +228,59 @@ fn handle_duplicate_top_level_names(top_level_nodes: Vec<Node>, short_paths: boo
         new_top_nodes
     } else {
         top_level_nodes
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn node(name: &str, size: u64, is_file: bool) -> Node {
+        Node {
+            name: PathBuf::from(name),
+            size,
+            children: vec![],
+            inode_device: None,
+            depth: 1,
+            is_file,
+        }
+    }
+
+    fn aggregate(only_dir: bool) -> AggregateData {
+        AggregateData {
+            min_size: None,
+            only_dir,
+            only_file: false,
+            number_of_lines: 10,
+            depth: usize::MAX,
+            using_a_filter: false,
+            short_paths: true,
+        }
+    }
+
+    // PERF-4 semantics: -D classifies by the walker-known is_file, no stat.
+    // The link path need not exist on disk at all - the old is_dir() would
+    // have dropped it (stat misses / target is a file).
+    #[test]
+    fn only_dir_keeps_dirs_and_links_drops_files() {
+        let nodes = vec![
+            node("real_dir", 30, false),
+            node("a_link", 20, false), // symlink or dangling: is_file = false
+            node("plain_file", 10, true),
+        ];
+        let root = get_biggest(nodes, &aggregate(true), None, &HashSet::new());
+        let names: Vec<String> = root
+            .children
+            .iter()
+            .map(|c| c.name.display().to_string())
+            .collect();
+        assert_eq!(names, vec!["real_dir".to_owned(), "a_link".to_owned()]);
+    }
+
+    #[test]
+    fn without_only_dir_all_entries_kept() {
+        let nodes = vec![node("real_dir", 30, false), node("plain_file", 10, true)];
+        let root = get_biggest(nodes, &aggregate(false), None, &HashSet::new());
+        assert_eq!(root.children.len(), 2);
     }
 }
