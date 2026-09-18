@@ -207,7 +207,11 @@ pub struct Cli {
     #[arg(short('A'), long, allow_hyphen_values(true))]
     pub atime: Option<String>,
 
-    /// just like -mtime, but based on file change time
+    /// just like -mtime, but based on file change time. On Windows this is
+    /// the file creation time (NTFS has no inode change time), so values are
+    /// not comparable across platforms
+    // BUG-18: upstream maps ctime to creation_time on Windows; documented
+    // instead of diverging from upstream behavior
     #[arg(short('y'), long, allow_hyphen_values(true))]
     pub ctime: Option<String>,
 

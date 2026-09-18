@@ -83,13 +83,12 @@ fn get_height_of_terminal() -> usize {
 }
 
 fn get_width_of_terminal() -> usize {
-    terminal_size().map_or(DEFAULT_TERMINAL_WIDTH, |(Width(w), _)| {
-        if cfg!(windows) {
-            max(w.into(), DEFAULT_TERMINAL_WIDTH)
-        } else {
-            w.into()
-        }
-    })
+    // BUG-18: the old Windows-only max(w, 80) clamp assumed the detected
+    // width was unreliable; terminal_size 0.4 reads the actual console
+    // buffer size on Windows, so the clamp only forced misaligned wrapping
+    // in terminals narrower than 80 columns. --width/-w remains the explicit
+    // override for terminals that do report nonsense.
+    terminal_size().map_or(DEFAULT_TERMINAL_WIDTH, |(Width(w), _)| w.into())
 }
 
 fn get_regex_value(maybe_value: Option<&Vec<String>>) -> Vec<Regex> {
