@@ -9,6 +9,7 @@
 use std::{
     cmp::{max, min},
     fs,
+    io::{BufWriter, Write},
     iter::repeat_n,
     path::Path,
 };
@@ -98,6 +99,8 @@ struct DrawData<'a> {
     // Cleaned indent: 2 columns per ancestor level. Maintained incrementally
     // (PERF-5): each level maps its own 3-char tree group, instead of running
     // 9 string replaces over the whole prefix per displayed node.
+    // PERF-2: a single buffer with push/truncate around each subtree instead
+    // of cloning the whole prefix string per recursion level.
     indent: String,
     percent_bar: String,
     display_data: &'a DisplayData,
@@ -113,18 +116,10 @@ fn clean_tree_group(chars: &str) -> &'static str {
 }
 
 impl DrawData<'_> {
-    fn get_new_indent(&self, has_children: bool, was_i_last: bool) -> String {
-        let chars = self.display_data.get_tree_chars(was_i_last, has_children);
-        self.indent.clone() + chars
-    }
-
-    // Cleaned form of get_new_indent's result, for the next level's prefix
-    fn get_new_clean_indent(&self, has_children: bool, was_i_last: bool) -> String {
-        let chars = self.display_data.get_tree_chars(was_i_last, has_children);
-        self.indent.clone() + clean_tree_group(chars)
-    }
-
     // TODO: can we test this?
+    // PERF-2: pre-sized once (every bar char is a 3-byte block, so the source
+    // byte length is an upper bound); the old version grew through repeated
+    // reallocations and boxed the iterator per call.
     fn generate_bar(&self, node: &DisplayNode, level: usize) -> String {
         if self.display_data.initial.is_screen_reader {
             return level.to_string();
@@ -133,30 +128,33 @@ impl DrawData<'_> {
         let num_bars = chars_in_bar as f32 * self.display_data.percent_size(node);
         let mut num_not_my_bar = (chars_in_bar as i32) - num_bars as i32;
 
-        let mut new_bar = String::new();
+        let mut new_bar = String::with_capacity(self.percent_bar.len());
         let idx = 5 - level.clamp(1, 4);
 
-        let itr: Box<dyn Iterator<Item = char>> = if self.display_data.initial.bars_on_right {
-            Box::new(self.percent_bar.chars())
-        } else {
-            Box::new(self.percent_bar.chars().rev())
-        };
-
-        for c in itr {
-            num_not_my_bar -= 1;
-            if num_not_my_bar <= 0 {
-                new_bar.push(BLOCKS[0]);
-            } else if c == BLOCKS[0] {
-                new_bar.push(BLOCKS[idx]);
-            } else {
-                new_bar.push(c);
-            }
-        }
         if self.display_data.initial.bars_on_right {
+            for c in self.percent_bar.chars() {
+                push_bar_char(&mut new_bar, c, &mut num_not_my_bar, idx);
+            }
             new_bar
         } else {
+            for c in self.percent_bar.chars().rev() {
+                push_bar_char(&mut new_bar, c, &mut num_not_my_bar, idx);
+            }
+            // undo the reversed visit order
             new_bar.chars().rev().collect()
         }
+    }
+}
+
+#[inline]
+fn push_bar_char(new_bar: &mut String, c: char, num_not_my_bar: &mut i32, idx: usize) {
+    *num_not_my_bar -= 1;
+    if *num_not_my_bar <= 0 {
+        new_bar.push(BLOCKS[0]);
+    } else if c == BLOCKS[0] {
+        new_bar.push(BLOCKS[idx]);
+    } else {
+        new_bar.push(c);
     }
 }
 
@@ -207,12 +205,16 @@ pub fn draw_it(
         longest_string_length,
         ls_colors: LsColors::from_env().unwrap_or_default(),
     };
-    let draw_data = DrawData {
+    let mut draw_data = DrawData {
         indent: String::new(),
         percent_bar: first_size_bar,
         display_data: &display_data,
     };
 
+    // PERF-2: buffer stdout like the -j branch; println! per line took the
+    // stdout lock and flushed on every displayed node
+    let stdout = std::io::stdout();
+    let mut out = BufWriter::with_capacity(64 * 1024, stdout.lock());
     if skip_total {
         for (count, c) in root_node
             .get_children_from_node(draw_data.display_data.initial.is_reversed)
@@ -220,11 +222,12 @@ pub fn draw_it(
         {
             let is_biggest = display_data.is_biggest(count, root_node.num_siblings());
             let was_i_last = display_data.is_last(count, root_node.num_siblings());
-            display_node(c, &draw_data, is_biggest, was_i_last);
+            display_node(c, &mut draw_data, &mut out, is_biggest, was_i_last, 0);
         }
     } else {
-        display_node(root_node, &draw_data, true, true);
+        display_node(root_node, &mut draw_data, &mut out, true, true, 0);
     }
+    out.flush().unwrap();
 }
 
 fn find_biggest_size_str(node: &DisplayNode, output_format: &str) -> usize {
@@ -259,24 +262,40 @@ fn find_longest_dir_name(
         .fold(longest, max)
 }
 
-fn display_node(node: &DisplayNode, draw_data: &DrawData, is_biggest: bool, is_last: bool) {
+fn display_node<W: Write>(
+    node: &DisplayNode,
+    draw_data: &mut DrawData,
+    out: &mut W,
+    is_biggest: bool,
+    is_last: bool,
+    depth: usize,
+) {
     let has_children = !node.children.is_empty();
-    // hacky way of working out how deep we are in the tree
-    let indent = draw_data.get_new_indent(has_children, is_last);
-    let level = ((indent.chars().count() - 1) / 2) - 1;
-    let bar_text = draw_data.generate_bar(node, level);
+    // PERF-2: push this node's 3-char tree group onto the shared indent
+    // buffer instead of cloning the whole prefix per level; children get the
+    // 2-column cleaned continuation, restored on the way back up
+    let indent_start = draw_data.indent.len();
+    let tree_chars = draw_data.display_data.get_tree_chars(is_last, has_children);
+    draw_data.indent.push_str(tree_chars);
+    // depth == level: the old form was ((indent.chars().count() - 1) / 2) - 1
+    // with indent = 2*depth cleaned columns + the 3-char group
+    let bar_text = draw_data.generate_bar(node, depth);
 
-    let to_print = format_string(node, &indent, &bar_text, is_biggest, draw_data.display_data);
+    let to_print = format_string(
+        node,
+        &draw_data.indent,
+        &bar_text,
+        is_biggest,
+        draw_data.display_data,
+    );
 
     if !draw_data.display_data.initial.is_reversed {
-        println!("{to_print}");
+        writeln!(out, "{to_print}").unwrap();
     }
 
-    let dd = DrawData {
-        indent: draw_data.get_new_clean_indent(has_children, is_last),
-        percent_bar: bar_text,
-        display_data: draw_data.display_data,
-    };
+    draw_data.indent.truncate(indent_start);
+    draw_data.indent.push_str(clean_tree_group(tree_chars));
+    let parent_bar = std::mem::replace(&mut draw_data.percent_bar, bar_text);
 
     let num_siblings = node.num_siblings();
 
@@ -284,13 +303,16 @@ fn display_node(node: &DisplayNode, draw_data: &DrawData, is_biggest: bool, is_l
         .get_children_from_node(draw_data.display_data.initial.is_reversed)
         .enumerate()
     {
-        let is_biggest = dd.display_data.is_biggest(count, num_siblings);
-        let was_i_last = dd.display_data.is_last(count, num_siblings);
-        display_node(c, &dd, is_biggest, was_i_last);
+        let is_biggest = draw_data.display_data.is_biggest(count, num_siblings);
+        let was_i_last = draw_data.display_data.is_last(count, num_siblings);
+        display_node(c, draw_data, out, is_biggest, was_i_last, depth + 1);
     }
 
+    draw_data.indent.truncate(indent_start);
+    draw_data.percent_bar = parent_bar;
+
     if draw_data.display_data.initial.is_reversed {
-        println!("{to_print}");
+        writeln!(out, "{to_print}").unwrap();
     }
 }
 
@@ -458,13 +480,25 @@ fn get_pretty_name(
     display_data: &DisplayData,
 ) -> String {
     if display_data.initial.colors_on {
-        let meta_result = fs::metadata(&node.name);
-        let directory_color = display_data
-            .ls_colors
-            .style_for_path_with_metadata(&node.name, meta_result.as_ref().ok());
-        let ansi_style = directory_color
-            .map(Style::to_nu_ansi_term_style)
-            .unwrap_or_default();
+        // PERF-2: plain files skip the per-node stat. lscolors classifies a
+        // follow-stat'ed regular file as RegularFile anyway: the exe/setuid/
+        // hardlink indicators cannot fire on Windows (mode=0, nlink=1 in
+        // lscolors), so metadata=None is byte-identical there. Non-file
+        // nodes (dirs, symlinks) keep the stat: follow semantics decide the
+        // di-vs-file color. Accepted corner case on Unix: with a custom
+        // LS_COLORS "mh" entry an nlink>1 file loses that style (defaults
+        // ship no mh).
+        let style = if node.is_file {
+            display_data
+                .ls_colors
+                .style_for_path_with_metadata(&node.name, None)
+        } else {
+            let meta_result = fs::metadata(&node.name);
+            display_data
+                .ls_colors
+                .style_for_path_with_metadata(&node.name, meta_result.as_ref().ok())
+        };
+        let ansi_style = style.map(Style::to_nu_ansi_term_style).unwrap_or_default();
         let out = ansi_style.paint(name_and_padding);
         format!("{out}")
     } else {
@@ -628,6 +662,7 @@ mod tests {
             name: PathBuf::from("/short"),
             size: 2_u64.pow(12), // This is 4.0K
             children: vec![],
+            is_file: true,
         };
         let indent = "┌─┴";
         let percent_bar = "";
@@ -645,6 +680,7 @@ mod tests {
             name: PathBuf::from(name),
             size: 2_u64.pow(12), // This is 4.0K
             children: vec![],
+            is_file: true,
         };
         let indent = "┌─┴";
         let percent_bar = "";
@@ -667,6 +703,7 @@ mod tests {
             name: PathBuf::from(name),
             size: 2_u64.pow(12),
             children: vec![],
+            is_file: true,
         };
         let indent = "┌─┴";
         let percent_bar = "";
@@ -686,6 +723,7 @@ mod tests {
             name: PathBuf::from("/short"),
             size: 2_u64.pow(12), // This is 4.0K
             children: vec![],
+            is_file: true,
         };
         let indent = "";
         let percent_bar = "3";
@@ -705,12 +743,14 @@ mod tests {
             name: PathBuf::from("leaf_file_with_long_name"),
             size: 2_u64.pow(10),
             children: vec![],
+            is_file: true,
         };
         for i in 0..12 {
             node = DisplayNode {
                 name: PathBuf::from(format!("dir{i}")),
                 size: 2_u64.pow(12),
                 children: vec![node],
+                is_file: false,
             };
         }
 
@@ -870,6 +910,7 @@ mod tests {
             name: PathBuf::from("/a"),
             size: u64::MAX,
             children: vec![],
+            is_file: true,
         };
         assert!((data.percent_size(&full) - 1.0).abs() < f32::EPSILON);
 
@@ -877,6 +918,7 @@ mod tests {
             name: PathBuf::from("/b"),
             size: 0,
             children: vec![],
+            is_file: true,
         };
         assert_eq!(data.percent_size(&zero), 0.0);
 
@@ -891,6 +933,7 @@ mod tests {
             name: PathBuf::from("/short"),
             size: 2_u64.pow(size),
             children: vec![],
+            is_file: true,
         };
         let first_size_bar = repeat_n(BLOCKS[0], 13).collect();
         let dd = DrawData {

@@ -10,6 +10,10 @@ pub struct DisplayNode {
     pub size: u64,
     pub name: PathBuf,
     pub children: Vec<DisplayNode>,
+    // PERF-2: carried over from the walk so colorized output can skip a
+    // per-node stat; placed last so derive(PartialOrd) stays compatible.
+    // Not serialized: the custom Serialize below is the stable -j contract.
+    pub is_file: bool,
 }
 
 impl DisplayNode {
@@ -90,6 +94,7 @@ mod tests {
             size: 10,
             name: PathBuf::from(std::ffi::OsStr::from_bytes(b"\xffbad")),
             children: vec![],
+            is_file: true,
         };
         // must not panic / error on invalid UTF-8 (pdu BUG-5 lesson)
         let json = serde_json::to_string(&node).expect("lossy serialization");
@@ -107,7 +112,9 @@ mod tests {
                 size: 4096,
                 name: PathBuf::from("/a/b"),
                 children: vec![],
+                is_file: true,
             }],
+            is_file: false,
         };
 
         // Default OUTPUT_TYPE is Human(""): sizes render human-readable
@@ -125,6 +132,7 @@ mod tests {
             size: encode_filetime(1_788_493_354),
             name: PathBuf::from("/a"),
             children: vec![],
+            is_file: true,
         };
         let json = serde_json::to_string(&ts_tree).unwrap();
         assert_eq!(json, r#"{"size":1788493354,"name":"/a","children":[]}"#);

@@ -158,6 +158,7 @@ fn flat_rebuilder(allowed_nodes: HashMap<&Path, &Node>, current: &Node) -> Displ
             name: v.name.clone(),
             size: v.size,
             children: vec![],
+            is_file: v.is_file,
         })
         .collect::<Vec<DisplayNode>>();
     build_display_node(new_children, current)
@@ -169,6 +170,7 @@ fn build_display_node(mut new_children: Vec<DisplayNode>, current: &Node) -> Dis
         name: current.name.clone(),
         size: current.size,
         children: new_children,
+        is_file: current.is_file,
     }
 }
 

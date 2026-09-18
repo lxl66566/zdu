@@ -48,6 +48,7 @@ pub fn get_all_file_types(
             )),
             size: node.size,
             children: vec![],
+            is_file: false,
         })
         .collect();
 
@@ -62,6 +63,7 @@ pub fn get_all_file_types(
             name: PathBuf::from("(others)"),
             size: actual_size,
             children: vec![],
+            is_file: false,
         });
         // '(others)' is the sum of the remaining nodes so it can be bigger than
         // the nodes above it: re-sort so the tree stays in size order.
@@ -78,6 +80,7 @@ pub fn get_all_file_types(
         name: PathBuf::from("(total)"),
         size: actual_size,
         children: displayed,
+        is_file: false,
     }
 }
 
