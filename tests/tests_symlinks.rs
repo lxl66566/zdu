@@ -308,6 +308,43 @@ pub fn test_junction_dereference_shows_target_content() {
     );
 }
 
+// Windows counterpart of test_sym_link_to_root_not_walked_twice (BUG-11):
+// a plain-directory root takes the cheap Windows metadata path, which
+// returns no file id, so the root-id seed used to be a no-op and a junction
+// back to the root descended the whole tree a second time. Under -L the
+// root metadata must resolve its id via the expensive path.
+#[cfg(target_os = "windows")]
+#[test]
+pub fn test_junction_to_root_not_walked_twice() {
+    use std::process::Command as OsCommand;
+
+    let dir = Builder::new().tempdir().unwrap();
+    let dir_s = dir.path().to_str().unwrap();
+
+    let sub = dir.path().join("sub");
+    std::fs::create_dir(&sub).unwrap();
+    std::fs::write(sub.join("big.bin"), vec![0u8; 100_000]).unwrap();
+
+    let self_junction = dir.path().join("jself");
+    let status = OsCommand::new("cmd")
+        .args(["/c", "mklink", "/J", self_junction.to_str().unwrap(), dir_s])
+        .status()
+        .unwrap();
+    assert!(status.success(), "mklink /J failed");
+
+    let mut cmd = cargo_bin_cmd!("zdu");
+    let output = cmd
+        .args(["-s", "-c", "-p", "-w", "999", "-L", dir_s])
+        .unwrap();
+    assert!(output.status.success());
+    let stdout = str::from_utf8(&output.stdout).unwrap();
+    assert_eq!(
+        stdout.matches("big.bin").count(),
+        1,
+        "root self-junction walked twice: {stdout}"
+    );
+}
+
 // BUG-13 + BUG-17 interaction: a -L followed link whose target is missing
 // is reported exactly once, as file_not_found. The initial stat of the link
 // fails too, which used to pile a second, contradictory

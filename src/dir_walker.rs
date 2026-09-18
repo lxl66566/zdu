@@ -177,9 +177,6 @@ fn walk_root(
     // the same directory twice (junction/symlink cycles under -L).
     let followed_dir_ids = Arc::new(Mutex::new(HashSet::new()));
 
-    let root_is_symlink = walk_data.follow_links
-        && fs::symlink_metadata(&d).is_ok_and(|m| m.file_type().is_symlink());
-
     // Synthetic outer parent above the root. Lets `finalize_chain` build
     // the root's Node via the same code path as every other directory: it
     // pushes the finished root Node into `outer.children`, then bubbles
@@ -198,15 +195,19 @@ fn walk_root(
         children: Mutex::new(Vec::new()),
     });
     // PERF-2: fetched once here; finalize_chain reuses it when the
-    // finished root Node is built
-    let root_metadata = get_metadata(
-        &d,
-        walk_data.use_apparent_size,
-        walk_data.follow_links && root_is_symlink,
-    );
-    // BUG-11: seed the root's own id so a -L symlink pointing back to the
-    // root itself (a/self -> a) is detected as a loop. Without it the whole
-    // subtree was descended into a second time; only -p runs noticed,
+    // finished root Node is built. Under -L the fetch must resolve with
+    // follow semantics unconditionally, not only when the root itself is a
+    // link: on Windows a plain-directory root takes the cheap metadata path,
+    // which returns no file id, so the BUG-11 seed below was a no-op and an
+    // in-tree junction back to the root descended the whole tree a second
+    // time. The expensive path runs once per root argument, so the cost is
+    // negligible; without -L the cheap path is kept (performance-sensitive).
+    // On Unix both stat flavors return the same id for a non-link root, so
+    // only the Windows fast/slow choice changes.
+    let root_metadata = get_metadata(&d, walk_data.use_apparent_size, walk_data.follow_links);
+    // BUG-11: seed the root's own id so a -L symlink/junction pointing back
+    // to the root itself (a/self -> a) is detected as a loop. Without it the
+    // whole subtree was descended into a second time; only -p runs noticed,
     // because otherwise the global hardlink dedup happens to claim the
     // root id first and masks the double walk.
     if let Some((_, Some(id), _)) = root_metadata.as_ref() {
