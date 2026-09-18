@@ -124,9 +124,15 @@ pub fn build_node(
     })
 }
 
+// PERF-8: the ordering key is (size, name) only. The old impl recursed
+// into children when size and name tied, making BinaryHeap operations
+// worst-case O(subtree). That tie-break was worthless anyway: children
+// order is nondeterministic under the parallel walk, so the deep compare
+// gave an unstable order. eq mirrors the key to keep the Ord/Eq contract
+// (cmp == Equal <=> eq) intact.
 impl PartialEq for Node {
     fn eq(&self, other: &Self) -> bool {
-        self.name == other.name && self.size == other.size && self.children == other.children
+        self.size == other.size && self.name == other.name
     }
 }
 
@@ -135,7 +141,6 @@ impl Ord for Node {
         self.size
             .cmp(&other.size)
             .then_with(|| self.name.cmp(&other.name))
-            .then_with(|| self.children.cmp(&other.children))
     }
 }
 
@@ -189,6 +194,43 @@ mod tests {
         )
         .unwrap();
         assert_eq!(dir.size, 0);
+    }
+
+    // PERF-8: ordering key is (size, name); children never participate.
+    // Same key with different subtrees must compare Equal (and eq must
+    // agree, per the Ord/Eq contract) so heap operations stay O(1) here.
+    #[test]
+    fn test_node_ordering_key_is_size_and_name_only() {
+        let mk = |name: &str, size: u64, child_sizes: Vec<u64>| Node {
+            name: PathBuf::from(name),
+            size,
+            children: child_sizes
+                .into_iter()
+                .map(|s| Node {
+                    name: PathBuf::from("c"),
+                    size: s,
+                    children: vec![],
+                    inode_device: None,
+                    depth: 1,
+                    is_file: true,
+                })
+                .collect(),
+            inode_device: None,
+            depth: 0,
+            is_file: false,
+        };
+
+        let a = mk("same", 10, vec![1, 2, 3]);
+        let b = mk("same", 10, vec![9, 9]);
+        assert_eq!(a.cmp(&b), Ordering::Equal);
+        assert_eq!(a, b);
+        // both directions (antisymmetry of the key)
+        assert_eq!(b.cmp(&a), Ordering::Equal);
+
+        let bigger = mk("same", 11, vec![]);
+        assert_eq!(a.cmp(&bigger), Ordering::Less);
+        let name_later = mk("zzz", 10, vec![]);
+        assert_eq!(a.cmp(&name_later), Ordering::Less);
     }
 
     #[test]
