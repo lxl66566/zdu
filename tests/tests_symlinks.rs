@@ -308,6 +308,48 @@ pub fn test_junction_dereference_shows_target_content() {
     );
 }
 
+// BUG-13 + BUG-17 interaction: a -L followed link whose target is missing
+// is reported exactly once, as file_not_found. The initial stat of the link
+// fails too, which used to pile a second, contradictory
+// "Could not get metadata" message on top.
+#[cfg(target_os = "windows")]
+#[test]
+pub fn test_dangling_junction_with_dereference_reported_once() {
+    use std::process::Command as OsCommand;
+
+    let dir = Builder::new().tempdir().unwrap();
+
+    let junction = dir.path().join("nowhere");
+    let status = OsCommand::new("cmd")
+        .args([
+            "/c",
+            "mklink",
+            "/J",
+            junction.to_str().unwrap(),
+            // Junctions can be created without the target existing
+            r"C:\nonexistent-zdu-test-target",
+        ])
+        .status()
+        .unwrap();
+    assert!(status.success(), "mklink /J failed");
+
+    let mut cmd = cargo_bin_cmd!("zdu");
+    cmd.args(["-L", "-p", "-c", "-w", "999", dir.path().to_str().unwrap()]);
+    // Nonzero: the empty tree next to a file_not_found root failure is
+    // BUG-17's exit-1 condition
+    let output_error = cmd.unwrap_err();
+    let result = output_error.as_output().unwrap();
+    let stderr = str::from_utf8(&result.stderr).unwrap();
+    assert!(
+        stderr.contains("No such file or directory"),
+        "expected the classification message, got: {stderr}"
+    );
+    assert!(
+        !stderr.contains("Could not get metadata"),
+        "dangling followed link must not double-report, got: {stderr}"
+    );
+}
+
 // BUG-3 regression: on Windows the default (allocated) mode used the logical
 // size and -s the on-disk size, i.e. the two modes were swapped. A sparse
 // file exposes the difference: logical 1 MiB, allocated ~0.

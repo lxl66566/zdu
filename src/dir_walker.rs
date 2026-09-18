@@ -356,6 +356,11 @@ fn walk_dir<'scope>(
     walk_data: &'scope WalkData<'scope>,
     inodes: &'scope InodeSet,
 ) {
+    // Set when the classification branch below already recorded this dir
+    // (file_not_found / not_a_directory, BUG-17). Passed to finalize_chain
+    // so a dir whose initial stat also failed does not get a second,
+    // contradictory metadata_unavailable message for the same path.
+    let mut classification_reported = false;
     // PERF-6: classify from data in hand instead of a fresh `is_dir()` stat
     // per directory. Only roots and -L followed symlinks pay the stat: its
     // follow semantics decide walk vs file-node vs file_not_found error,
@@ -480,9 +485,10 @@ fn walk_dir<'scope>(
                 editable_error.file_not_found.insert(bad_file);
             },
         }
+        classification_reported = true;
     }
 
-    finalize_chain(pending, walk_data);
+    finalize_chain(pending, walk_data, classification_reported);
 }
 
 // Returns the file's Node when the entry is a file (so the caller can
@@ -611,13 +617,23 @@ fn process_entry<'scope>(
 // decrement. That collapses what would otherwise be three separate locks
 // per directory (push from child, decrement, take children) into one.
 //
+// `classification_reported` guards only the starting dir: walk_dir's
+// BUG-17 branch already recorded it (missing / dangling / special-file
+// path), so the metadata_unavailable below must not fire on top. Parents
+// further up the chain never went through that branch; a None metadata
+// there is a genuine mid-walk race and must stay reported.
+//
 // Termination paths:
 //   1. pending stays > 0 after decrement: not the last completer. Return with the prior level's
 //      Node already pushed into our children.
 //   2. pending hits 0 and parent is None: this is the synthetic outer created in `walk_it`. Its
 //      `children` now holds the finished root Node; `walk_it` drains it after `rayon::scope`
 //      returns.
-fn finalize_chain(mut pending: Arc<PendingDir>, walk_data: &WalkData) {
+fn finalize_chain(
+    mut pending: Arc<PendingDir>,
+    walk_data: &WalkData,
+    mut classification_reported: bool,
+) {
     let mut node_to_push: Option<Node> = None;
     loop {
         // Single critical section per directory: push the prior level's
@@ -676,10 +692,14 @@ fn finalize_chain(mut pending: Arc<PendingDir>, walk_data: &WalkData) {
         });
         // BUG-13: build_node returns None only when metadata is missing
         // (stat raced with a rename/delete). The fully-walked subtree is
-        // dropped with it; record it so the loss is visible.
-        if node_to_push.is_none() {
+        // dropped with it; record it so the loss is visible. Skipped when
+        // walk_dir's classification branch already reported the same path
+        // (BUG-17): a confirmed missing/dangling root is not a metadata
+        // race, one accurate message is enough.
+        if node_to_push.is_none() && !classification_reported {
             record_metadata_unavailable(&pending.dir, walk_data);
         }
+        classification_reported = false;
         pending = parent;
     }
 }
@@ -981,7 +1001,9 @@ pub(crate) mod tests {
     fn test_walk_missing_root_records_file_not_found() {
         // A root that is neither a dir nor a file hits the `else if
         // !pending.dir.is_file()` branch in walk_dir and should be recorded
-        // under `file_not_found`.
+        // under `file_not_found`. Exactly once: the root's initial stat also
+        // failed (metadata None), which finalize_chain used to misreport as a
+        // second metadata_unavailable for the same path.
         let tmp = tempfile::tempdir().unwrap();
         let missing = tmp.path().join("does-not-exist");
 
@@ -997,6 +1019,45 @@ pub(crate) mod tests {
                 .contains(&missing.to_string_lossy().into_owned()),
             "expected file_not_found to contain {missing:?}, got {:?}",
             errors.file_not_found
+        );
+        assert!(
+            !errors
+                .metadata_unavailable
+                .contains(&missing.to_string_lossy().into_owned()),
+            "missing root must not also be reported as metadata_unavailable, got {:?}",
+            errors.metadata_unavailable
+        );
+    }
+
+    // Same dedup for a -L followed dangling link below the root: walk_dir's
+    // classification (file_not_found) is the single accurate message, not a
+    // metadata race (BUG-17 + BUG-13 interaction).
+    #[cfg(unix)]
+    #[test]
+    fn test_dangling_followed_link_reported_once() {
+        use std::os::unix::fs::symlink;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let dangling = tmp.path().join("dangling");
+        symlink("/nonexistent-zdu-test-target", &dangling).unwrap();
+
+        let mut walkdata = create_walker(true);
+        walkdata.follow_links = true;
+        let mut roots = HashSet::new();
+        roots.insert(tmp.path().to_path_buf());
+
+        let _ = walk_it(roots, &walkdata);
+        let errors = walkdata.errors.lock().unwrap();
+        let dangling_s = dangling.to_string_lossy().into_owned();
+        assert!(
+            errors.file_not_found.contains(&dangling_s),
+            "expected file_not_found to contain {dangling_s:?}, got {:?}",
+            errors.file_not_found
+        );
+        assert!(
+            !errors.metadata_unavailable.contains(&dangling_s),
+            "dangling followed link must not also be reported as metadata_unavailable, got {:?}",
+            errors.metadata_unavailable
         );
     }
 
@@ -1086,7 +1147,7 @@ pub(crate) mod tests {
             children: Mutex::new(vec![walked_child]),
         });
 
-        finalize_chain(raced, &walkdata);
+        finalize_chain(raced, &walkdata, false);
 
         let errors = walkdata.errors.lock().unwrap();
         let raced_path = tmp.path().join("raced").to_string_lossy().into_owned();
