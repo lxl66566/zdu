@@ -17,6 +17,11 @@ pub struct Node {
     pub name: PathBuf,
     pub size: u64,
     pub children: Vec<Node>,
+    // Only ever assigned, never read: the walk dedups through its own
+    // InodeSet, not through this field. Kept for future per-node identity
+    // features (PERF-8 note: it used to be copied in the duplicate-name
+    // rename path, which masked the dead_code lint).
+    #[allow(dead_code)]
     pub inode_device: Option<(u64, u64)>,
     pub depth: usize,
     // PERF-3: the walker already knows this; storing it avoids a per-node

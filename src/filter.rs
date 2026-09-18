@@ -188,47 +188,39 @@ fn names_have_dup(top_level_nodes: &Vec<Node>) -> bool {
     false
 }
 
-fn handle_duplicate_top_level_names(top_level_nodes: Vec<Node>, short_paths: bool) -> Vec<Node> {
+fn handle_duplicate_top_level_names(
+    mut top_level_nodes: Vec<Node>,
+    short_paths: bool,
+) -> Vec<Node> {
     // If we have top level names that are the same - we need to tweak them:
+    // PERF-8: only the displayed name changes per round; the subtrees used
+    // to be deep-cloned (one whole-tree clone up front, then per-node child
+    // clones for up to 10 rounds). Mutating just `name` in place is
+    // equivalent: each round appends "({ancestor})" to the last component,
+    // which never introduces new components, so later rounds walk the same
+    // component sequence the cloned version did.
     if short_paths && names_have_dup(&top_level_nodes) {
-        let mut new_top_nodes = top_level_nodes.clone();
         let mut dir_walk_up_count = 0;
 
-        while names_have_dup(&new_top_nodes) && dir_walk_up_count < 10 {
+        while names_have_dup(&top_level_nodes) && dir_walk_up_count < 10 {
             dir_walk_up_count += 1;
-            let mut newer = vec![];
-
-            for node in &new_top_nodes {
+            for node in &mut top_level_nodes {
                 let mut folders = node.name.iter().rev();
                 // Get parent folder (if second time round get grandparent and so on)
                 for _ in 0..dir_walk_up_count {
                     folders.next();
                 }
-                match folders.next() {
-                    // Add (parent_name) to path of Node
-                    Some(data) => {
-                        let parent = encode_u8(data.as_encoded_bytes());
-                        let current_node = node.name.display();
-                        let n = Node {
-                            name: PathBuf::from(format!("{current_node}({parent})")),
-                            size: node.size,
-                            children: node.children.clone(),
-                            inode_device: node.inode_device,
-                            depth: node.depth,
-                            is_file: node.is_file,
-                        };
-                        newer.push(n);
-                    },
-                    // Node does not have a parent
-                    None => newer.push(node.clone()),
+                // Add (parent_name) to path of Node; nodes without enough
+                // ancestors keep their name (previously cloned unchanged)
+                if let Some(data) = folders.next() {
+                    let parent = encode_u8(data.as_encoded_bytes());
+                    let current_node = node.name.display();
+                    node.name = PathBuf::from(format!("{current_node}({parent})"));
                 }
             }
-            new_top_nodes = newer;
         }
-        new_top_nodes
-    } else {
-        top_level_nodes
     }
+    top_level_nodes
 }
 
 #[cfg(test)]
@@ -282,5 +274,41 @@ mod tests {
         let nodes = vec![node("real_dir", 30, false), node("plain_file", 10, true)];
         let root = get_biggest(nodes, &aggregate(false), None, &HashSet::new());
         assert_eq!(root.children.len(), 2);
+    }
+
+    // PERF-8 rewrite: renaming must walk one ancestor further per round and
+    // leave everything but `name` (sizes, children identity) untouched
+    #[test]
+    fn duplicate_top_level_names_disambiguated_by_ancestors() {
+        let mut a = node("p/x/dup", 40, false);
+        a.children = vec![node("p/x/dup/inner", 5, true)];
+        let b = node("q/x/dup", 30, false);
+
+        let out = handle_duplicate_top_level_names(vec![a, b], true);
+        let names: Vec<String> = out.iter().map(|n| n.name.display().to_string()).collect();
+        // round 1 appends the parent ("x" for both, dup remains), round 2
+        // reaches the differing grandparent ("p" vs "q")
+        assert_eq!(names, vec![
+            "p/x/dup(x)(p)".to_owned(),
+            "q/x/dup(x)(q)".to_owned()
+        ]);
+        // subtrees ride along without being copied/rebuilt
+        assert_eq!(out[0].children[0].name, PathBuf::from("p/x/dup/inner"));
+        assert_eq!(out[0].size, 40);
+    }
+
+    #[test]
+    fn no_dup_or_full_paths_leaves_names_untouched() {
+        let out = handle_duplicate_top_level_names(
+            vec![node("p/a", 1, false), node("q/b", 1, false)],
+            true,
+        );
+        assert_eq!(out[0].name, PathBuf::from("p/a"));
+
+        let out = handle_duplicate_top_level_names(
+            vec![node("p/a", 1, false), node("q/a", 1, false)],
+            false,
+        );
+        assert_eq!(out[1].name, PathBuf::from("q/a"));
     }
 }

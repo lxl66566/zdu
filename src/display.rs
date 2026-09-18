@@ -413,9 +413,14 @@ fn pad_or_trim_filename(node: &DisplayNode, indent: &str, display_data: &Display
 
     // Add spaces after the filename so we can draw the % used bar chart.
     // saturating_sub: extreme trees degrade to no padding instead of panicking
-    name + " "
-        .repeat(display_data.longest_string_length.saturating_sub(width))
-        .as_str()
+    // PERF-8: extend in place instead of " ".repeat + concat (two extra
+    // allocations per displayed line)
+    let mut padded = name;
+    padded.extend(repeat_n(
+        ' ',
+        display_data.longest_string_length.saturating_sub(width),
+    ));
+    padded
 }
 
 fn maybe_trim_filename(name_in: String, indent: &str, display_data: &DisplayData) -> String {
