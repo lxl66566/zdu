@@ -235,6 +235,14 @@ fn main() {
         .flat_map(|x| simplified_dirs.iter().map(move |d| d.join(&x)))
         .collect();
 
+    // PERF-6: absolute ignores pre-extracted once so the per-entry ignore
+    // check never rescans the whole set for this run-constant
+    let absolute_ignore_directories: Vec<PathBuf> = ignored_full_path
+        .iter()
+        .filter(|p| p.is_absolute())
+        .cloned()
+        .collect();
+
     let output_format = config.get_output_format(&options);
 
     let ignore_hidden = config.get_ignore_hidden(&options);
@@ -263,6 +271,7 @@ fn main() {
 
     let walk_data = WalkData {
         ignore_directories: ignored_full_path,
+        absolute_ignore_directories,
         filter_regex: &filter_regexs,
         invert_filter_regex: &invert_filter_regexs,
         allowed_filesystems,

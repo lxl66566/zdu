@@ -34,6 +34,12 @@ pub enum Operator {
 #[allow(clippy::struct_excessive_bools)]
 pub struct WalkData<'a> {
     pub ignore_directories: HashSet<PathBuf>,
+    // PERF-6: absolute members of ignore_directories, extracted once.
+    // "Any absolute ignore present?" is a constant per run, yet the old code
+    // re-scanned the whole set per entry (is_ignored_path) and per directory
+    // (canonical_dir decision); an empty Vec short-circuits both. Relative
+    // ignores (the common `-X name` case) never pay the canonicalize path.
+    pub absolute_ignore_directories: Vec<PathBuf>,
     pub filter_regex: &'a [Regex],
     pub invert_filter_regex: &'a [Regex],
     pub allowed_filesystems: HashSet<u64>,
@@ -262,11 +268,8 @@ fn is_ignored_path(path: &Path, canonical_dir: Option<&Path>, walk_data: &WalkDa
         return true;
     }
 
-    if !walk_data
-        .ignore_directories
-        .iter()
-        .any(|ignored| ignored.is_absolute())
-    {
+    let absolute_ignores = &walk_data.absolute_ignore_directories;
+    if absolute_ignores.is_empty() {
         return false;
     }
 
@@ -275,16 +278,14 @@ fn is_ignored_path(path: &Path, canonical_dir: Option<&Path>, walk_data: &WalkDa
     // per-entry canonicalize.
     if let Some(dir) = canonical_dir {
         let file_name = path.file_name().unwrap_or_default();
-        walk_data
-            .ignore_directories
+        absolute_ignores
             .iter()
-            .any(|ignored| ignored.is_absolute() && path_starts_with(ignored, &dir.join(file_name)))
+            .any(|ignored| path_starts_with(ignored, &dir.join(file_name)))
     } else {
         let absolute_entry_path = fs::canonicalize(path).unwrap_or_default();
-        walk_data
-            .ignore_directories
+        absolute_ignores
             .iter()
-            .any(|ignored| ignored.is_absolute() && path_starts_with(ignored, &absolute_entry_path))
+            .any(|ignored| path_starts_with(ignored, &absolute_entry_path))
     }
 }
 
@@ -365,15 +366,12 @@ fn walk_dir<'scope>(
     };
     if is_dir {
         // Canonicalized once per directory, reused for every entry's ignore
-        // check (PERF-1). Only needed when absolute ignore paths are in play.
-        let canonical_dir: Option<PathBuf> = if walk_data
-            .ignore_directories
-            .iter()
-            .any(|ignored| ignored.is_absolute())
-        {
-            fs::canonicalize(&pending.dir).ok()
-        } else {
+        // check (PERF-1). Only needed when absolute ignore paths are in play
+        // (PERF-6: constant per run, precomputed in WalkData).
+        let canonical_dir: Option<PathBuf> = if walk_data.absolute_ignore_directories.is_empty() {
             None
+        } else {
+            fs::canonicalize(&pending.dir).ok()
         };
         // EINTR is the only retryable error. Looping iteratively (rather than
         // recursing on retry, like the old code) keeps stack depth O(1).
@@ -741,6 +739,7 @@ pub(crate) mod tests {
         let indicator = PIndicator::build_me();
         WalkData {
             ignore_directories: HashSet::new(),
+            absolute_ignore_directories: Vec::new(),
             filter_regex: &[],
             invert_filter_regex: &[],
             allowed_filesystems: HashSet::new(),
@@ -755,6 +754,41 @@ pub(crate) mod tests {
             progress_data: indicator.data.clone(),
             errors: Arc::new(Mutex::new(RuntimeErrors::default())),
         }
+    }
+
+    // PERF-6: the absolute-ignore short-circuit must preserve -X semantics
+    // (exact hit, absolute prefix hit, no match) with the precomputed Vec
+    #[test]
+    fn test_is_ignored_path_semantics() {
+        let tmp = tempfile::tempdir().unwrap();
+        let ignored_dir = tmp.path().join("node_modules");
+        fs::create_dir_all(&ignored_dir).unwrap();
+
+        let mut walk_data = create_walker(true);
+        walk_data.ignore_directories = [tmp.path().join("plain")]
+            .into_iter()
+            .collect::<HashSet<_>>();
+
+        // Relative ignores only: no absolute prefixes, no match anywhere
+        assert!(!is_ignored_path(&ignored_dir, None, &walk_data));
+
+        // Exact hit still wins
+        assert!(is_ignored_path(&tmp.path().join("plain"), None, &walk_data));
+
+        // Absolute prefix: parent canonical_dir + file name falls inside it
+        let absolute = fs::canonicalize(&ignored_dir).unwrap();
+        walk_data.absolute_ignore_directories = vec![absolute];
+        let inside = ignored_dir.join("pkg");
+        let canonical_parent = fs::canonicalize(&ignored_dir).ok();
+        assert!(is_ignored_path(
+            &inside,
+            canonical_parent.as_deref(),
+            &walk_data
+        ));
+
+        // Outside the prefix: no match
+        let outside = tmp.path().join("other");
+        assert!(!is_ignored_path(&outside, None, &walk_data));
     }
 
     // Hardlinks share (dev, ino); with block sizes only the first-seen link
