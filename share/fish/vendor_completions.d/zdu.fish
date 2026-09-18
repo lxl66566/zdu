@@ -31,7 +31,7 @@ m\t'last modified time'"
 complete -c zdu -s p -l full-paths -d 'Subdirectories will not have their path shortened'
 complete -c zdu -s L -l dereference-links -d 'dereference sym links - Treat sym links as directories and go into them'
 complete -c zdu -s x -l limit-filesystem -d 'Only count the files and directories on the same filesystem as the supplied directory'
-complete -c zdu -s s -l apparent-size -d 'Use file length instead of blocks'
+complete -c zdu -s s -l apparent-size -d 'Use file length instead of blocks (on Windows the default mode is the on-disk size, which equals file length for plain files)'
 complete -c zdu -s r -l reverse -d 'Print tree upside down (biggest highest)'
 complete -c zdu -s c -l no-colors -d 'No colors will be printed (Useful for commands like: watch)'
 complete -c zdu -s C -l force-colors -d 'Force colors print'

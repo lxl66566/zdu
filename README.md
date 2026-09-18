@@ -32,6 +32,7 @@ Yet another fast, parallel `du` — the ease of use of [dust](https://github.com
 - Intuitive tree chart with percent bars
 - Default: no symlink follow; hard links counted once; `-L` to follow links with cycle-safe dedup
 - `-x` stay on one filesystem, `-s` apparent size, `-f` count files, `-m` show file times
+- Windows default mode reports the on-disk size for sparse/cloud-placeholder files (where the file length is wildly off); plain and NTFS-compressed files report the file length, since du-style allocated size has no cheap per-file API on Windows
 - `-j` JSON output, `--files-from` / `--files0-from` path lists
 - Regex / file-type / min-size / time filters
 - Config file (`~/.config/zdu/config.toml`) for defaults

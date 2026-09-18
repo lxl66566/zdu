@@ -54,7 +54,8 @@ pub struct Cli {
     #[arg(short('x'), long)]
     pub limit_filesystem: bool,
 
-    /// Use file length instead of blocks
+    /// Use file length instead of blocks (on Windows the default mode is the
+    /// on-disk size, which equals file length for plain files)
     #[arg(short('s'), long)]
     pub apparent_size: bool,
 

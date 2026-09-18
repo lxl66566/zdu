@@ -271,9 +271,79 @@ pub fn test_junction_dereference_shows_target_content() {
 
     // Both the real dir and the followed junction must expose f.txt.
     // stfu8 escapes path separators in the tree output, hence the doubled \.
-    assert!(stdout.contains("jt\\\\f.txt"), "target content missing: {stdout}");
+    assert!(
+        stdout.contains("jt\\\\f.txt"),
+        "target content missing: {stdout}"
+    );
     assert!(
         stdout.contains("jlink\\\\f.txt"),
         "followed junction content missing: {stdout}"
     );
+}
+
+// BUG-3 regression: on Windows the default (allocated) mode used the logical
+// size and -s the on-disk size, i.e. the two modes were swapped. A sparse
+// file exposes the difference: logical 1 MiB, allocated ~0.
+#[cfg(target_os = "windows")]
+#[test]
+pub fn test_sparse_file_allocated_vs_apparent_size() {
+    use std::process::Command as OsCommand;
+
+    let dir = Builder::new().tempdir().unwrap();
+    let sp = dir.path().join("sp.bin");
+    std::fs::write(&sp, vec![0u8; 25]).unwrap();
+
+    // fsutil needs no elevation for a sparse flag on a file we own; skip the
+    // test on filesystems that do not support it (e.g. FAT/exFAT temp dirs)
+    let flagged = OsCommand::new("fsutil")
+        .args(["sparse", "setflag", sp.to_str().unwrap()])
+        .status()
+        .is_ok_and(|s| s.success());
+    if !flagged {
+        eprintln!("skipping: fsutil sparse setflag unavailable");
+        return;
+    }
+    // extend the logical size without allocating anything
+    std::fs::OpenOptions::new()
+        .write(true)
+        .open(&sp)
+        .unwrap()
+        .set_len(1 << 20)
+        .unwrap();
+
+    let run = |args: &[&str]| {
+        let mut cmd = cargo_bin_cmd!("zdu");
+        let output = cmd
+            .args([
+                "-p",
+                "-c",
+                "-b",
+                "-d",
+                "1",
+                "-o",
+                "b",
+                "-w",
+                "999",
+                dir.path().to_str().unwrap(),
+            ])
+            .args(args)
+            .unwrap();
+        let stdout = str::from_utf8(&output.stdout).unwrap().to_owned();
+        let sp_line = stdout
+            .lines()
+            .find(|l| l.contains("sp.bin"))
+            .unwrap_or_else(|| panic!("sp.bin missing from output: {stdout}"));
+        sp_line
+            .trim()
+            .split('B')
+            .next()
+            .and_then(|s| s.trim().parse::<u64>().ok())
+            .unwrap_or_else(|| panic!("cannot parse size from line: {sp_line}"))
+    };
+
+    // -s: apparent size = logical 1 MiB
+    assert_eq!(run(&["-s"]), 1 << 20);
+    // default: allocated size must be well below logical (all-zero sparse
+    // file; 0 on NTFS, up to 64 Ki on volumes with coarser sparse support)
+    assert!(run(&[]) < 512 * 1024);
 }

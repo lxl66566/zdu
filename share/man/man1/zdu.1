@@ -37,7 +37,7 @@ dereference sym links \- Treat sym links as directories and go into them
 Only count the files and directories on the same filesystem as the supplied directory
 .TP
 \fB\-s\fR, \fB\-\-apparent\-size\fR
-Use file length instead of blocks
+Use file length instead of blocks (on Windows the default mode is the on\-disk size, which equals file length for plain files)
 .TP
 \fB\-r\fR, \fB\-\-reverse\fR
 Print tree upside down (biggest highest)

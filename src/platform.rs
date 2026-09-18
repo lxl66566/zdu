@@ -108,9 +108,12 @@ fn metadata_from(
 
     // Size:
     // We assume (naively?) that for the common cases the free size info is the
-    // same as one would get by doing the expensive thing. Sparse, encrypted and
-    // compressed files are not included in the common cases, as one can image
-    // there being more than view on their size.
+    // same as one would get by doing the expensive thing. Sparse and cloud
+    // placeholder files are not included in the common cases, as one can
+    // imagine there being more than one view on their size. Compressed and
+    // encrypted files are: their stored size differs from the logical one,
+    // but resolving it needs an open per file, which measurably dominates
+    // the walk on NTFS-compressed trees (see NEEDS_EXPENSIVE_SIZE).
 
     // Savings in orders of magnitude in terms of time, io and cpu have been
     // observed on hdd, windows 10, some 100Ks files taking up some hundreds of
@@ -130,8 +133,16 @@ fn metadata_from(
     const FILE_ATTRIBUTE_RECALL_ON_OPEN: u32 = 0x0004_0000;
     const FILE_ATTRIBUTE_RECALL_ON_DATA_ACCESS: u32 = 0x0040_0000;
     const FILE_ATTRIBUTE_OFFLINE: u32 = 0x0000_1000;
-    // normally FILE_ATTRIBUTE_SPARSE_FILE would be enough, however Windows sometimes likes to mask it out. see: https://stackoverflow.com/q/54560454
-    const IS_PROBABLY_ONEDRIVE: u32 = FILE_ATTRIBUTE_SPARSE_FILE
+    // Attributes for which the free logical size is unacceptably wrong in
+    // allocated (default) mode, so those entries must take the expensive
+    // path: sparse files (normally FILE_ATTRIBUTE_SPARSE_FILE would be
+    // enough, however Windows sometimes likes to mask it out. see:
+    // https://stackoverflow.com/q/54560454) and cloud placeholders.
+    // FILE_ATTRIBUTE_COMPRESSED/ENCRYPTED are deliberately NOT here: their
+    // stored size differs from logical too, but obtaining it needs an open
+    // per file (~17us each, a measured 4x slowdown on a fully NTFS-compressed
+    // tree); they report file length in allocated mode instead.
+    const NEEDS_EXPENSIVE_SIZE: u32 = FILE_ATTRIBUTE_SPARSE_FILE
         | FILE_ATTRIBUTE_PINNED
         | FILE_ATTRIBUTE_UNPINNED
         | FILE_ATTRIBUTE_RECALL_ON_OPEN
@@ -139,11 +150,16 @@ fn metadata_from(
         | FILE_ATTRIBUTE_OFFLINE;
     let attr_filtered = md.file_attributes()
         & !(FILE_ATTRIBUTE_HIDDEN | FILE_ATTRIBUTE_READONLY | FILE_ATTRIBUTE_SYSTEM);
-    if ((attr_filtered & FILE_ATTRIBUTE_ARCHIVE) != 0
+    let is_plain = (attr_filtered & FILE_ATTRIBUTE_ARCHIVE) != 0
         || (attr_filtered & FILE_ATTRIBUTE_DIRECTORY) != 0
-        || md.file_attributes() == FILE_ATTRIBUTE_NORMAL)
-        && !((attr_filtered & IS_PROBABLY_ONEDRIVE != 0) && use_apparent_size)
-    {
+        || md.file_attributes() == FILE_ATTRIBUTE_NORMAL;
+    // In allocated (default) mode, entries whose on-disk size may differ from
+    // the free logical size must take the expensive path. In apparent mode
+    // the free size is already exact, so the plain-attribute check suffices.
+    // BUG-3 (inherited from upstream dust): this gate used to key on
+    // use_apparent_size the other way round, sending sparse/OneDrive files to
+    // the expensive path only under -s, exactly where the free size suffices.
+    if is_plain && (use_apparent_size || (attr_filtered & NEEDS_EXPENSIVE_SIZE) == 0) {
         Some((
             md.len(),
             None,
@@ -184,10 +200,16 @@ fn get_metadata_expensive(
     let h = Handle::from_file(file);
     let info = information(&h).ok()?;
 
+    // BUG-3 (inherited from upstream dust, which swaps the two kinds):
+    // apparent size (-s) is the logical file size; the default (allocated)
+    // mode is the on-disk size via GetCompressedFileSizeW, which is
+    // sparse/compression aware and equals the logical size for plain files
+    // (so it agrees with the fast path). There is no cheap way to obtain a
+    // cluster-rounded allocation size without opening a handle, so Windows
+    // "allocated" deliberately means "bytes actually stored", not blocks.
     if use_apparent_size {
-        use filesize::PathExt;
         Some((
-            path.size_on_disk().ok()?,
+            info.file_size(),
             Some((info.file_index(), info.volume_serial_number())),
             (
                 filetime_to_unix_seconds(info.last_write_time().unwrap()),
@@ -196,8 +218,9 @@ fn get_metadata_expensive(
             ),
         ))
     } else {
+        use filesize::PathExt;
         Some((
-            info.file_size(),
+            path.size_on_disk().ok()?,
             Some((info.file_index(), info.volume_serial_number())),
             (
                 filetime_to_unix_seconds(info.last_write_time().unwrap()),
