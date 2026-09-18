@@ -599,6 +599,21 @@ pub fn test_json_with_filetime_outputs_integer_timestamp() {
 }
 
 #[test]
+pub fn test_invalid_cli_regex_exits_with_clear_message() {
+    // BUG-9 regression: the message said "Ignoring bad value" while the
+    // process actually terminated; wording must match the fatal behavior
+    // (-I ignore-file lines are the ones that get skipped with a warning)
+    let mut cmd = cargo_bin_cmd!("zdu");
+    cmd.arg("-P").arg("-v").arg("[").arg("tests/test_dir");
+    let output_error = cmd.unwrap_err();
+    let result = output_error.as_output().unwrap();
+    assert_eq!(result.status.code(), Some(1));
+    let stderr = str::from_utf8(&result.stderr).unwrap();
+    assert!(stderr.contains("Invalid regex"), "{stderr}");
+    assert!(!stderr.contains("Ignoring"), "{stderr}");
+}
+
+#[test]
 pub fn test_handle_duplicate_names() {
     // Check that even if we run on a multiple directories with the same name
     // we still show the distinct parent dir in the output

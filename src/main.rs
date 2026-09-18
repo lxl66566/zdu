@@ -97,8 +97,11 @@ fn get_regex_value(maybe_value: Option<&Vec<String>>) -> Vec<Regex> {
         .unwrap_or(&Vec::new())
         .iter()
         .map(|reg| {
+            // Unlike a bad line in an -I ignore file (skipped with a
+            // warning), an invalid CLI regex is fatal; the message must
+            // say so instead of claiming the value is ignored
             Regex::new(reg).unwrap_or_else(|err| {
-                eprintln!("Ignoring bad value for regex {err:?}");
+                eprintln!("Invalid regex {reg:?}: {err}; exiting");
                 process::exit(1)
             })
         })
