@@ -41,7 +41,7 @@ Yet another fast, parallel `du` — the ease of use of [dust](https://github.com
 
 Choose one:
 
-- Manual install from the latest [Releases](https://github.com/lxl66566/zdu/Releases)
+- Manual install from the latest [Releases](https://github.com/lxl66566/zdu/releases)
 - use [bpm](https://github.com/lxl66566/bpm-rs): `bpm i https://github.com/lxl66566/zdu`
 - NixOS user: install from my [NUR](https://github.com/lxl66566/NUR)
 - compile from source: `cargo install --git https://github.com/lxl66566/zdu`
